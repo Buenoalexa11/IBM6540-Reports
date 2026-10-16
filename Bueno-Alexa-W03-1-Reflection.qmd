@@ -465,7 +465,6 @@ The large gap signals **overfitting** — the model memorized noise in the train
 
 ## Links
 
-- Published report on GitHub Pages: <https://buenoalexa11.github.io/IBM6540/Bueno-Alexa-W03-1-Reflection.html>
-- GitHub Repository: <https://github.com/Buenoalexa11/IBM6540>
-
+- Published report on GitHub Pages: <https://buenoalexa11.github.io/IBM6540-Reports/Bueno-Alexa-W03-1-Reflection.html>
+- GitHub Repository: <https://github.com/Buenoalexa11/IBM6540-Reports>
 :::
