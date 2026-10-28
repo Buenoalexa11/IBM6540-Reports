@@ -102,7 +102,7 @@ As @tbl-ppt shows, Revealjs is the better choice when a presentation is **data-d
 
 ### Link
 
-**Published presentation:** <https://buenoalexa11.github.io/IBM6540-Reports/Joining%20Customer%20Data%20in%20R.html>
+**Published presentation:** <https://buenoalexa11.github.io/IBM6540/Joining%20Customer%20Data%20in%20R.html>
 
 ### What the Presentation Is About
 
@@ -279,8 +279,6 @@ Joins match rows using a **key** column. Set operations compare **entire rows** 
 
 This module taught me to handle both ends of an analysis. Advanced wrangling functions like `left_join()`, `anti_join()`, and `intersect()` let me combine and compare tables the way real business data is stored, across several related tables. Revealjs then lets me present those results in reproducible slides that update when the data does.
 
-# Appendix
-
-- **Published presentation:** <https://buenoalexa11.github.io/IBM6540-Reports/Joining%20Customer%20Data%20in%20R.html>
+- **Published report (GitHub Pages):** <https://buenoalexa11.github.io/IBM6540-Reports/M05%20Reflection%20on%20Ch09%20Evaluation.html>
 
 - **GitHub repository:** <https://github.com/Buenoalexa11/IBM6540-Reports>
