@@ -4312,502 +4312,71 @@ Table 5: Sensitivity under three averaging methods
 </div>
 </div>
 <div id="tabset-2-2" class="tab-pane" role="tabpanel" aria-labelledby="tabset-2-2-tab">
-<p>#| label: tbl-per-tier #| tbl-cap: “Sensitivity (recall) for each loyalty tier” mc_preds |&gt; group_by(loyalty_tier) |&gt; summarise(customers = n(), share = n() / nrow(mc_preds), sensitivity = mean(.pred_class == loyalty_tier)) |&gt; kable(digits = 3)</p>
-<pre><code>
-:::
-
-| Estimator | Sensitivity | How each tier is weighted |
-|:--|:--:|:--|
-| Macro (default) | 0.542 | Every tier counts **equally** (25% each) |
-| Micro | 0.722 | Every **customer** counts equally, so big tiers dominate |
-| Macro-weighted | 0.722 | Each tier weighted by its **share of customers** |
-
-: Summary of the three averaging methods {#tbl-mc-summary}
-
-**1. Why micro looks more favorable:** micro-averaging pools every customer together before computing sensitivity, so each tier&#39;s influence is proportional to its size. Bronze makes up about 60% of customers, and the model predicts Bronze well (@tbl-per-tier). That strong Bronze performance dominates the average and hides the weak results on Gold and Platinum. Micro and macro-weighted sensitivity come out **identical** in @tbl-mc-summary. For sensitivity, weighting each tier&#39;s recall by its share of customers is mathematically the same as pooling all customers.[^micro]
-
-[^micro]: For multiclass sensitivity, both micro and macro-weighted averaging reduce to total correct predictions ÷ total customers, which is the same as overall accuracy.
-
-**2. Protecting Platinum:** I would choose **macro averaging**. It gives every tier the **same weight**, so Platinum counts for 25% of the score even though it is only about 5% of customers. If the model does poorly on Platinum, the macro score drops noticeably, which is what I want, because Platinum customers are the most valuable to identify correctly.
-
-**3. The misleadingly optimistic method:** **Micro averaging** (and macro-weighted, which matches it here) is the most likely to mislead. In loyalty programs, the high-value tiers are almost always the smallest, so a model can score well just by getting the large, low-value Bronze tier right while badly misclassifying VIPs. A marketer seeing a high micro score might wrongly believe the model can be trusted to find Platinum customers for a premium campaign.
-
-::: {.callout-warning}
-## Lesson
-
-Always check **per-class** results, not just one averaged number. In marketing, the classes we care most about (VIPs, churners, responders) are often the rare ones.
-:::
-
-# Conclusion
-
-This chapter showed me that &quot;how good is the model?&quot; depends on the **business question**. The confusion matrix and threshold choice should reflect the real costs of each error. AUC tells me how well the model ranks prospects, which is what matters when mailing from the top of a list. MAE and RMSE react very differently to the occasional huge order. And in multiclass problems, the averaging method can hide poor performance on the most valuable customers.
-
-# Tool Use
-
-I used Claude (Anthropic) to help organize this report, build the reproducible example data, and check the R code. I reviewed every step and can explain each metric and line of code on my own.
-
-# Appendix
-
-- **Published report (GitHub Pages):** &lt;https://buenoalexa11.github.io/IBM6540-Reports/M05%20Reflection%20on%20Ch09%20Evaluation.html&gt;
-- **GitHub repository:** &lt;https://github.com/Buenoalexa11/IBM6540-Reports&gt;
-
-
-&lt;!-- --&gt;
-
-::: {.quarto-embedded-source-code}
-```````````````````{.markdown shortcodes=&quot;false&quot;}
----
-title: &quot;M05: Reflection on Ch09 (Evaluation)&quot;
-subtitle: &quot;Judging Model Effectiveness with yardstick&quot;
-author: &quot;Alexa Bueno&quot;
-date: today
-format:
-  html:
-    toc: true
-    toc-depth: 4
-    toc-expand: 1
-    toc-location: right-body
-    toc-title: &quot;Contents&quot;
-    number-sections: true
-    code-fold: show
-    code-tools: true
-    code-overflow: wrap
-    theme: cosmo
-    highlight-style: github
-    df-print: paged
-    embed-resources: true
-execute:
-  warning: false
-  message: false
-  freeze: true
----
-
-quarto-executable-code-5450563D
-
-```r
-#| label: packages
-#| include: false
-
-library(tidymodels)
-library(knitr)
-tidymodels_prefer()
-
-# helper: pull one metric value out of a yardstick results table
-get_metric &lt;- function(results, metric_name) {
-  results |&gt; filter(.metric == metric_name) |&gt; pull(.estimate)
-}
-pct &lt;- function(x) scales::percent(x, accuracy = 0.1)
-```
-
-# Introduction
-
-Chapter 9 of *Tidy Modeling with R* is about **judging how good a model really is**. A model is only useful to a marketer if its errors are understood: who it misses, who it wrongly targets, and how much those mistakes cost. In this report I work through the four exercises from the codebook using the `yardstick` package, covering classification metrics, ROC/AUC, regression metrics, and multiclass averaging.
-
-## Setup: The Direct-Mail Campaign Data
-
-The exercises use three sets of predictions:
-
-1. `test_preds`: predicted response (`yes`/`no`) to a direct-mail campaign
-2. `reg_preds`: predicted dollar value of each customer&#39;s next order
-3. `mc_preds`: predicted loyalty tier (Bronze, Silver, Gold, Platinum)
-
-The code below creates them so this report is fully reproducible.[^setup]
-
-[^setup]: The data are simulated with a fixed seed to mirror the codebook&#39;s direct-mail example. All numbers in the text are calculated with inline R code, so they update automatically if the data change.
-
-quarto-executable-code-5450563D
-
-```r
-#| label: setup-data
-#| code-fold: true
-#| code-summary: &quot;Show data setup code&quot;
-
-set.seed(6540)
-n &lt;- 2000
-
-customers &lt;- tibble(
-  recency_days = runif(n, 1, 365),
-  frequency    = rpois(n, 3),
-  email_opens  = rpois(n, 4),
-  avg_spend    = rgamma(n, shape = 2, scale = 40)
-) |&gt;
-  mutate(
-    log_odds  = -2.1 - 0.006 * recency_days + 0.35 * frequency +
-                0.18 * email_opens + 0.004 * avg_spend,
-    responded = factor(if_else(runif(n) &lt; plogis(log_odds), &quot;yes&quot;, &quot;no&quot;),
-                       levels = c(&quot;yes&quot;, &quot;no&quot;)),
-    order_value_next = pmax(5, 20 + 8 * frequency + 0.5 * avg_spend + rnorm(n, 0, 15))
-  ) |&gt;
-  select(-log_odds)
-
-split &lt;- initial_split(customers, prop = 0.75, strata = responded)
-train &lt;- training(split)
-test  &lt;- testing(split)
-
-# Classification model: will the customer respond?
-class_fit &lt;- logistic_reg() |&gt;
-  set_engine(&quot;glm&quot;) |&gt;
-  fit(responded ~ recency_days + frequency + email_opens + avg_spend, data = train)
-
-test_preds &lt;- augment(class_fit, new_data = test)
-
-# Regression model: how much will the next order be?
-reg_fit &lt;- linear_reg() |&gt;
-  fit(order_value_next ~ frequency + avg_spend + email_opens, data = train)
-
-reg_preds &lt;- augment(reg_fit, new_data = test) |&gt;
-  select(order_value_next, .pred)
-
-# Multiclass predictions: loyalty tier
-tiers &lt;- c(&quot;Bronze&quot;, &quot;Silver&quot;, &quot;Gold&quot;, &quot;Platinum&quot;)
-conf_probs &lt;- list(
-  Bronze   = c(0.90, 0.07, 0.02, 0.01),
-  Silver   = c(0.35, 0.55, 0.08, 0.02),
-  Gold     = c(0.25, 0.20, 0.45, 0.10),
-  Platinum = c(0.20, 0.15, 0.30, 0.35)
-)
-truth_tier &lt;- sample(tiers, 1000, replace = TRUE, prob = c(0.60, 0.25, 0.10, 0.05))
-
-mc_preds &lt;- tibble(
-  loyalty_tier = factor(truth_tier, levels = tiers),
-  .pred_class  = factor(map_chr(truth_tier, \(t) sample(tiers, 1, prob = conf_probs[[t]])),
-                        levels = tiers)
-)
-```
-
-The test set has **`r nrow(test_preds)` customers**, and **`r pct(mean(test_preds$responded == &quot;yes&quot;))`** of them responded.
-
-# Exercise 9.1: Confusion Matrix and Threshold Tradeoff
-
-## Part A: Reading the Confusion Matrix
-
-&gt; **Prompt:** Run `conf_mat(test_preds, truth = responded, estimate = .pred_class)` and use the output to answer:
-&gt;
-&gt; 1. How many customers actually responded (&quot;yes&quot;) and were correctly predicted to respond? What is this cell called?
-&gt; 2. How many customers actually responded but were predicted &quot;no&quot;? What is this cell called, and what does it cost a marketer?
-&gt; 3. How many customers did not respond but were predicted &quot;yes&quot;? What is this cell called, and what does it cost a marketer?
-&gt; 4. In plain English, which type of error is more costly for a direct-mail campaign with a \$5 mailing cost and \$50 average order value: a false positive or a false negative? Explain your reasoning.
-
-quarto-executable-code-5450563D
-
-```r
-#| label: fig-conf-mat
-#| fig-cap: &quot;Confusion matrix for the direct-mail response model (0.5 threshold)&quot;
-
-cm &lt;- conf_mat(test_preds, truth = responded, estimate = .pred_class)
-cm
-
-autoplot(cm, type = &quot;heatmap&quot;)
-```
-
-quarto-executable-code-5450563D
-
-```r
-#| label: cm-cells
-
-tp &lt;- cm$table[&quot;yes&quot;, &quot;yes&quot;]   # predicted yes, truly yes
-fn &lt;- cm$table[&quot;no&quot;,  &quot;yes&quot;]   # predicted no,  truly yes
-fp &lt;- cm$table[&quot;yes&quot;, &quot;no&quot;]    # predicted yes, truly no
-tn &lt;- cm$table[&quot;no&quot;,  &quot;no&quot;]    # predicted no,  truly no
-```
-
-| Question | Count | Cell name | Cost to a marketer |
-|:--|:--:|:--|:--|
-| Responded **and** predicted &quot;yes&quot; | **`r tp`** | True Positive (TP) | None: a correct, profitable mailing |
-| Responded **but** predicted &quot;no&quot; | **`r fn`** | False Negative (FN) | A **missed sale**: the customer would have bought, but we never mailed them |
-| Did not respond **but** predicted &quot;yes&quot; | **`r fp`** | False Positive (FP) | A **wasted mailing**: we paid to mail someone who did not buy |
-
-: Reading the confusion matrix (@fig-conf-mat) {#tbl-cm}
-
-### Which Error Is More Costly?
-
-For this campaign, a **false negative is more costly**.
-
-- A **false positive** wastes one mailing: **\$5**.
-- A **false negative** loses one order: **\$50** of revenue, which is **10 times more**.
-
-So it is worth mailing a customer whenever their chance of responding is above the break-even point:
-
-$$
-p \times \$50 &gt; \$5 \quad\Rightarrow\quad p &gt; \frac{5}{50} = 0.10
-$$ {#eq-breakeven}
-
-::: {.callout-important}
-## Business Takeaway
-
-@eq-breakeven shows the default 0.5 threshold is far too strict for this campaign. Any customer with more than a **10%** chance of responding is profitable to mail. Using 0.5 throws away many profitable customers just to avoid cheap \$5 mistakes.
-:::
-
-## Part B: Threshold Tradeoff
-
-&gt; **Prompt:** Using `test_preds`, compute `precision` and `sens` at the default 0.5 threshold. Now manually create a new `.pred_class` column using a threshold of 0.3 instead (classify as &quot;yes&quot; if `.pred_yes &gt; 0.3`). Recompute both metrics. Which one increased, and why does lowering the threshold have that effect?
-
-Precision and sensitivity answer two different questions:
-
-$$
-\text{Precision} = \frac{TP}{TP + FP} \qquad \text{Sensitivity} = \frac{TP}{TP + FN}
-$$ {#eq-prec-sens}
-
-quarto-executable-code-5450563D
-
-```r
-#| label: threshold
-
-prec_sens &lt;- metric_set(precision, sens)
-
-# Default 0.5 threshold
-at_05 &lt;- prec_sens(test_preds, truth = responded, estimate = .pred_class)
-
-# Lower threshold of 0.3
-test_preds_03 &lt;- test_preds |&gt;
-  mutate(.pred_class = factor(if_else(.pred_yes &gt; 0.3, &quot;yes&quot;, &quot;no&quot;),
-                              levels = c(&quot;yes&quot;, &quot;no&quot;)))
-
-at_03 &lt;- prec_sens(test_preds_03, truth = responded, estimate = .pred_class)
-
-prec_05 &lt;- get_metric(at_05, &quot;precision&quot;); sens_05 &lt;- get_metric(at_05, &quot;sens&quot;)
-prec_03 &lt;- get_metric(at_03, &quot;precision&quot;); sens_03 &lt;- get_metric(at_03, &quot;sens&quot;)
-```
-
-quarto-executable-code-5450563D
-
-```r
-#| label: tbl-threshold
-#| tbl-cap: &quot;Precision and sensitivity at two thresholds&quot;
-
-tibble(
-  Metric = c(&quot;Precision&quot;, &quot;Sensitivity&quot;),
-  `Threshold 0.5` = c(prec_05, sens_05),
-  `Threshold 0.3` = c(prec_03, sens_03),
-  Change = c(prec_03 - prec_05, sens_03 - sens_05)
-) |&gt;
-  kable(digits = 3)
-```
-
-**Sensitivity increased** from `r pct(sens_05)` to `r pct(sens_03)`, while precision moved from `r pct(prec_05)` to `r pct(prec_03)` (@tbl-threshold).
-
-**Why:** lowering the threshold makes the model label **more customers as &quot;yes&quot;**.
-
-- Many of those newly flagged customers are real responders, so we **catch more of the buyers**. False negatives go down, and sensitivity goes up.
-- But we also flag more non-responders, so a **smaller share of the mailed list actually buys**. False positives go up, and precision usually goes down.
-
-::: {.callout-tip}
-## Which Threshold Fits This Campaign?
-
-Because a missed buyer (\$50) costs much more than a wasted mailing (\$5), trading some precision for higher sensitivity is the right move here. The 0.3 threshold is closer to the 0.10 break-even point from @eq-breakeven.
-:::
-
-# Exercise 9.2: ROC/AUC Interpretation and Custom `metric_set()`
-
-## Part A: Interpreting AUC
-
-&gt; **Prompt:**
-&gt;
-&gt; 1. Look up the AUC value from the roc-curve chunk. Is it above or below 0.65 (the &quot;usable for targeting&quot; threshold from the callout)?
-&gt; 2. In plain English, what does an AUC of that value mean? Complete this sentence: &quot;If we randomly pick one customer who responded and one who did not, the model assigns a higher predicted probability to the responder ____% of the time.&quot;
-&gt; 3. The ROC curve plot shows the sensitivity/specificity tradeoff across all thresholds. At what point on the curve would you operate if your campaign budget only allows you to mail the top 10% of prospects?
-
-quarto-executable-code-5450563D
-
-```r
-#| label: auc
-
-auc_val &lt;- roc_auc(test_preds, truth = responded, .pred_yes) |&gt; pull(.estimate)
-auc_val
-
-# Operating point if we can only mail the top 10% of prospects
-cutoff_10 &lt;- quantile(test_preds$.pred_yes, 0.90)
-
-top10 &lt;- test_preds |&gt;
-  mutate(.pred_class = factor(if_else(.pred_yes &gt;= cutoff_10, &quot;yes&quot;, &quot;no&quot;),
-                              levels = c(&quot;yes&quot;, &quot;no&quot;)))
-
-sens_10 &lt;- sens(top10, truth = responded, estimate = .pred_class) |&gt; pull(.estimate)
-spec_10 &lt;- spec(top10, truth = responded, estimate = .pred_class) |&gt; pull(.estimate)
-prec_10 &lt;- precision(top10, truth = responded, estimate = .pred_class) |&gt; pull(.estimate)
-base_rate &lt;- mean(test_preds$responded == &quot;yes&quot;)
-```
-
-quarto-executable-code-5450563D
-
-```r
-#| label: fig-roc
-#| fig-cap: &quot;ROC curve with the top-10% mailing operating point marked in red&quot;
-
-roc_curve(test_preds, truth = responded, .pred_yes) |&gt;
-  autoplot() +
-  geom_point(data = tibble(x = 1 - spec_10, y = sens_10),
-             aes(x = x, y = y), inherit.aes = FALSE,
-             color = &quot;red&quot;, size = 4) +
-  annotate(&quot;text&quot;, x = 1 - spec_10 + 0.04, y = sens_10,
-           label = &quot;Top 10% mailed&quot;, hjust = 0, color = &quot;red&quot;)
-```
-
-**1. Is it usable?** The AUC is **`r round(auc_val, 3)`**, which is **`r if (auc_val &gt;= 0.65) &quot;above&quot; else &quot;below&quot;`** the 0.65 &quot;usable for targeting&quot; threshold. `r if (auc_val &gt;= 0.65) &quot;The model ranks customers well enough to guide who gets mailed.&quot; else &quot;The model is not yet reliable enough to guide targeting.&quot;`
-
-**2. Plain-English meaning:**
-
-&gt; &quot;If we randomly pick one customer who responded and one who did not, the model assigns a higher predicted probability to the responder **`r round(auc_val * 100, 1)`%** of the time.&quot;
-
-An AUC of 0.5 would be a coin flip and 1.0 would be perfect ranking, so this model is clearly better than random at **sorting** prospects from most to least likely to respond.
-
-**3. Operating point for the top 10%:** If the budget only covers the top 10% of prospects, I would mail everyone with a predicted probability of at least **`r round(cutoff_10, 3)`**. That is the red point in @fig-roc, near the **lower-left** of the curve:
-
-- **Specificity** is high (`r pct(spec_10)`): almost no non-responders get mailed.
-- **Sensitivity** is low (`r pct(sens_10)`): we only reach a small share of all responders, because we mail so few people.
-- The response rate among mailed customers is **`r pct(prec_10)`**, compared with **`r pct(base_rate)`** if we mailed people at random. That is a **lift of `r round(prec_10 / base_rate, 2)`×**.[^lift]
-
-[^lift]: Lift = response rate among the targeted group ÷ overall response rate. It is one of the most common ways marketers judge a targeting model.
-
-## Part B: Custom `metric_set()`
-
-&gt; **Prompt:** Create a `metric_set()` containing accuracy, roc_auc, sens, spec, and f_meas. Apply it to `test_preds`. If you had to report just two of these five numbers to a VP of Marketing who is unfamiliar with machine learning metrics, which would you choose and why?
-
-quarto-executable-code-5450563D
-
-```r
-#| label: tbl-metric-set
-#| tbl-cap: &quot;Five evaluation metrics for the direct-mail model&quot;
-
-campaign_metrics &lt;- metric_set(accuracy, roc_auc, sens, spec, f_meas)
-
-all_metrics &lt;- campaign_metrics(test_preds, truth = responded,
-                                estimate = .pred_class, .pred_yes)
-
-all_metrics |&gt; kable(digits = 3)
-```
-
-::: {.panel-tabset}
-
-### My Two Picks
-
-I would report **AUC** and **sensitivity**:
-
-1. **AUC (`r round(auc_val, 3)`):** &quot;How good is the model at putting the best prospects at the top of the list?&quot; Direct mail is a **ranking** problem: we mail from the top down until the budget runs out. AUC measures exactly that.
-2. **Sensitivity (`r pct(get_metric(all_metrics, &quot;sens&quot;))`):** &quot;What share of the people who would buy does our mailing actually reach?&quot; Because a missed buyer costs \$50 versus a \$5 mailing, this is the number tied most directly to lost revenue.
-
-### Why Not the Others?
-
-- **Accuracy** can be misleading. If most customers do not respond, a model that predicts &quot;no&quot; for everyone looks accurate but finds zero buyers.
-- **Specificity** measures how well we avoid non-responders, which matters less when mailings are cheap.
-- **F-measure** blends precision and sensitivity into one number that is hard to explain without a statistics background.
-
-:::
-
-# Exercise 9.3: Regression Metric Sensitivity to Outliers
-
-&gt; **Prompt:** Add one synthetic &quot;whale&quot; customer to `reg_preds` with `order_value_next = 5000` and `.pred = 200` (a badly missed prediction). Recompute rmse and mae. Which metric moved more in percentage terms? What does this tell you about choosing RMSE vs. MAE for marketing data with occasional huge orders?
-
-$$
-\text{RMSE} = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2} \qquad
-\text{MAE} = \frac{1}{n}\sum_{i=1}^{n}\lvert y_i - \hat{y}_i \rvert
-$$ {#eq-rmse-mae}
-
-quarto-executable-code-5450563D
-
-```r
-#| label: whale
-
-reg_metrics &lt;- metric_set(rmse, mae)
-
-before &lt;- reg_metrics(reg_preds, truth = order_value_next, estimate = .pred)
-
-reg_preds_whale &lt;- reg_preds |&gt;
-  bind_rows(tibble(order_value_next = 5000, .pred = 200))
-
-after &lt;- reg_metrics(reg_preds_whale, truth = order_value_next, estimate = .pred)
-
-whale_tbl &lt;- tibble(
-  Metric   = c(&quot;RMSE&quot;, &quot;MAE&quot;),
-  Before   = c(get_metric(before, &quot;rmse&quot;), get_metric(before, &quot;mae&quot;)),
-  After    = c(get_metric(after, &quot;rmse&quot;),  get_metric(after, &quot;mae&quot;))
-) |&gt;
-  mutate(`% Change` = (After - Before) / Before * 100)
-```
-
-quarto-executable-code-5450563D
-
-```r
-#| label: tbl-whale
-#| tbl-cap: &quot;Effect of one whale customer on RMSE and MAE&quot;
-
-kable(whale_tbl, digits = 2)
-```
-
-quarto-executable-code-5450563D
-
-```r
-#| include: false
-rmse_chg &lt;- whale_tbl$`% Change`[1]
-mae_chg  &lt;- whale_tbl$`% Change`[2]
-```
-
-Adding **one** customer out of `r nrow(reg_preds_whale)` made **RMSE jump by `r round(rmse_chg, 1)`%**, while **MAE rose by only `r round(mae_chg, 1)`%** (@tbl-whale). RMSE moved about **`r round(rmse_chg / mae_chg, 1)` times more**.
-
-**Why:** as @eq-rmse-mae shows, RMSE **squares** each error before averaging. The whale&#39;s \$4,800 miss becomes 4,800² ≈ 23 million, which swamps everyone else. MAE takes the plain absolute value, so the whale counts as just one large error.
-
-::: {.callout-note}
-## Choosing RMSE vs. MAE for Marketing Data
-
-- Use **MAE** when I want a stable, easy-to-explain number (&quot;on average we are off by \$X per order&quot;) and do not want a few unusual orders to dominate the evaluation.
-- Use **RMSE** when big misses are **especially costly**, for example forecasting inventory for a VIP account where under-predicting a huge order is a serious problem.
-- Marketing data often has a **long right tail** (a few huge orders), so I would report **both**. A big gap between RMSE and MAE is itself a signal that outliers are present.
-:::
-
-# Exercise 9.4: Multiclass Averaging
-
-&gt; **Prompt:** Re-run the multiclass loyalty_tier example using `estimator = &quot;micro&quot;` instead of the default macro averaging for sens. Also run it with `estimator = &quot;macro_weighted&quot;`. Compare all three numbers.
-&gt;
-&gt; 1. Why might micro-averaging look more favorable when one class (Bronze) is much larger than the others?
-&gt; 2. Which estimator would you choose if you wanted to ensure that Platinum customers, the rarest and most valuable tier, are not underrepresented in the metric? Explain your reasoning.
-&gt; 3. In a marketing context, which averaging method is most likely to give a misleadingly optimistic picture of model performance? Why?
-
-quarto-executable-code-5450563D
-
-```r
-#| label: multiclass
-
-sens_macro    &lt;- sens(mc_preds, truth = loyalty_tier, estimate = .pred_class)
-sens_micro    &lt;- sens(mc_preds, truth = loyalty_tier, estimate = .pred_class,
-                      estimator = &quot;micro&quot;)
-sens_weighted &lt;- sens(mc_preds, truth = loyalty_tier, estimate = .pred_class,
-                      estimator = &quot;macro_weighted&quot;)
-
-mc_compare &lt;- bind_rows(sens_macro, sens_micro, sens_weighted)
-```
-
-::: {.panel-tabset}
-
-### Three Averages
-
-quarto-executable-code-5450563D
-
-```r
-#| label: tbl-mc-compare
-#| tbl-cap: &quot;Sensitivity under three averaging methods&quot;
-kable(mc_compare, digits = 3)
-```
-
-### Per-Tier Sensitivity
-
-quarto-executable-code-5450563D
-
-```r
-#| label: tbl-per-tier
-#| tbl-cap: &quot;Sensitivity (recall) for each loyalty tier&quot;
-mc_preds |&gt;
-  group_by(loyalty_tier) |&gt;
-  summarise(customers = n(),
-            share = n() / nrow(mc_preds),
-            sensitivity = mean(.pred_class == loyalty_tier)) |&gt;
-  kable(digits = 3)</code></pre>
+<div class="cell">
+<details open class="code-fold">
+<summary>Code</summary>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>mc_preds <span class="sc">|&gt;</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(loyalty_tier) <span class="sc">|&gt;</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">customers =</span> <span class="fu">n</span>(),</span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>            <span class="at">share =</span> <span class="fu">n</span>() <span class="sc">/</span> <span class="fu">nrow</span>(mc_preds),</span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>            <span class="at">sensitivity =</span> <span class="fu">mean</span>(.pred_class <span class="sc">==</span> loyalty_tier)) <span class="sc">|&gt;</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">kable</span>(<span class="at">digits =</span> <span class="dv">3</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</details>
+<div id="tbl-per-tier" class="cell quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-tbl figure">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-per-tier-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table 6: Sensitivity (recall) for each loyalty tier
+</figcaption>
+<div aria-describedby="tbl-per-tier-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="do-not-create-environment cell caption-top table table-sm table-striped small">
+<thead>
+<tr class="header">
+<th style="text-align: left;">loyalty_tier</th>
+<th style="text-align: right;">customers</th>
+<th style="text-align: right;">share</th>
+<th style="text-align: right;">sensitivity</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Bronze</td>
+<td style="text-align: right;">602</td>
+<td style="text-align: right;">0.602</td>
+<td style="text-align: right;">0.902</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Silver</td>
+<td style="text-align: right;">252</td>
+<td style="text-align: right;">0.252</td>
+<td style="text-align: right;">0.480</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Gold</td>
+<td style="text-align: right;">107</td>
+<td style="text-align: right;">0.107</td>
+<td style="text-align: right;">0.402</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Platinum</td>
+<td style="text-align: right;">39</td>
+<td style="text-align: right;">0.039</td>
+<td style="text-align: right;">0.385</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
 </div>
 </div>
 </div>
 <div id="tbl-mc-summary" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-tbl figure">
 <figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-mc-summary-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Table 6: Summary of the three averaging methods
+Table 7: Summary of the three averaging methods
 </figcaption>
 <div aria-describedby="tbl-mc-summary-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
 <table class="caption-top table">
@@ -4826,17 +4395,17 @@ Table 6: Summary of the three averaging methods
 <tbody>
 <tr class="odd">
 <td style="text-align: left;">Macro (default)</td>
-<td style="text-align: center;"><code>r round(sens_macro$.estimate, 3)</code></td>
+<td style="text-align: center;">0.542</td>
 <td style="text-align: left;">Every tier counts <strong>equally</strong> (25% each)</td>
 </tr>
 <tr class="even">
 <td style="text-align: left;">Micro</td>
-<td style="text-align: center;"><code>r round(sens_micro$.estimate, 3)</code></td>
+<td style="text-align: center;">0.722</td>
 <td style="text-align: left;">Every <strong>customer</strong> counts equally, so big tiers dominate</td>
 </tr>
 <tr class="odd">
 <td style="text-align: left;">Macro-weighted</td>
-<td style="text-align: center;"><code>r round(sens_weighted$.estimate, 3)</code></td>
+<td style="text-align: center;">0.722</td>
 <td style="text-align: left;">Each tier weighted by its <strong>share of customers</strong></td>
 </tr>
 </tbody>
@@ -4844,7 +4413,7 @@ Table 6: Summary of the three averaging methods
 </div>
 </figure>
 </div>
-<p><strong>1. Why micro looks more favorable:</strong> micro-averaging pools every customer together before computing sensitivity, so each tier’s influence is proportional to its size. Bronze makes up about 60% of customers, and the model predicts Bronze well (<strong>?@tbl-per-tier</strong>). That strong Bronze performance dominates the average and hides the weak results on Gold and Platinum. Micro and macro-weighted sensitivity come out <strong>identical</strong> in <a href="#tbl-mc-summary" class="quarto-xref">Table 6</a>. For sensitivity, weighting each tier’s recall by its share of customers is mathematically the same as pooling all customers.<a href="#fn3" class="footnote-ref" id="fnref3" role="doc-noteref"><sup>3</sup></a></p>
+<p><strong>1. Why micro looks more favorable:</strong> micro-averaging pools every customer together before computing sensitivity, so each tier’s influence is proportional to its size. Bronze makes up about 60% of customers, and the model predicts Bronze well (<a href="#tbl-per-tier" class="quarto-xref">Table 6</a>). That strong Bronze performance dominates the average and hides the weak results on Gold and Platinum. Micro and macro-weighted sensitivity come out <strong>identical</strong> in <a href="#tbl-mc-summary" class="quarto-xref">Table 7</a>. For sensitivity, weighting each tier’s recall by its share of customers is mathematically the same as pooling all customers.<a href="#fn3" class="footnote-ref" id="fnref3" role="doc-noteref"><sup>3</sup></a></p>
 <p><strong>2. Protecting Platinum:</strong> I would choose <strong>macro averaging</strong>. It gives every tier the <strong>same weight</strong>, so Platinum counts for 25% of the score even though it is only about 5% of customers. If the model does poorly on Platinum, the macro score drops noticeably, which is what I want, because Platinum customers are the most valuable to identify correctly.</p>
 <p><strong>3. The misleadingly optimistic method:</strong> <strong>Micro averaging</strong> (and macro-weighted, which matches it here) is the most likely to mislead. In loyalty programs, the high-value tiers are almost always the smallest, so a model can score well just by getting the large, low-value Bronze tier right while badly misclassifying VIPs. A marketer seeing a high micro score might wrongly believe the model can be trusted to find Platinum customers for a premium campaign.</p>
 <div class="callout callout-style-default callout-warning callout-titled">
@@ -4873,8 +4442,10 @@ Table 6: Summary of the three averaging methods
 <h1 data-number="8"><span class="header-section-number">8</span> Appendix</h1>
 <ul>
 <li><strong>Published report (GitHub Pages):</strong> <a href="https://buenoalexa11.github.io/IBM6540-Reports/M05%20Reflection%20on%20Ch09%20Evaluation.html" class="uri">https://buenoalexa11.github.io/IBM6540-Reports/M05%20Reflection%20on%20Ch09%20Evaluation.html</a></li>
-<li><strong>GitHub repository:</strong> <a href="https://github.com/Buenoalexa11/IBM6540-Reports" class="uri">https://github.com/Buenoalexa11/IBM6540-Reports</a> ``````````````````` :::</li>
+<li><strong>GitHub repository:</strong> <a href="https://github.com/Buenoalexa11/IBM6540-Reports" class="uri">https://github.com/Buenoalexa11/IBM6540-Reports</a></li>
 </ul>
+<!-- -->
+
 </section>
 
 
@@ -5337,7 +4908,462 @@ Table 6: Summary of the three averaging methods
       }
     }
   });
-  </script>
+  </script><div class="modal fade" id="quarto-embedded-source-code-modal" tabindex="-1" aria-labelledby="quarto-embedded-source-code-modal-label" aria-hidden="true"><div class="modal-dialog modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="quarto-embedded-source-code-modal-label">Source Code</h5><button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb18" data-shortcodes="false"><pre class="sourceCode markdown code-with-copy"><code class="sourceCode markdown"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a><span class="an">title:</span><span class="co"> &quot;M05: Reflection on Ch09 (Evaluation)&quot;</span></span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a><span class="an">subtitle:</span><span class="co"> &quot;Judging Model Effectiveness with yardstick&quot;</span></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a><span class="an">author:</span><span class="co"> &quot;Alexa Bueno&quot;</span></span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a><span class="an">date:</span><span class="co"> today</span></span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a><span class="an">format:</span></span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a><span class="co">  html:</span></span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a><span class="co">    toc: true</span></span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a><span class="co">    toc-depth: 4</span></span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a><span class="co">    toc-expand: 1</span></span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a><span class="co">    toc-location: right-body</span></span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a><span class="co">    toc-title: &quot;Contents&quot;</span></span>
+<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a><span class="co">    number-sections: true</span></span>
+<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a><span class="co">    code-fold: show</span></span>
+<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a><span class="co">    code-tools: true</span></span>
+<span id="cb18-16"><a href="#cb18-16" aria-hidden="true" tabindex="-1"></a><span class="co">    code-overflow: wrap</span></span>
+<span id="cb18-17"><a href="#cb18-17" aria-hidden="true" tabindex="-1"></a><span class="co">    theme: cosmo</span></span>
+<span id="cb18-18"><a href="#cb18-18" aria-hidden="true" tabindex="-1"></a><span class="co">    highlight-style: github</span></span>
+<span id="cb18-19"><a href="#cb18-19" aria-hidden="true" tabindex="-1"></a><span class="co">    df-print: paged</span></span>
+<span id="cb18-20"><a href="#cb18-20" aria-hidden="true" tabindex="-1"></a><span class="co">    embed-resources: true</span></span>
+<span id="cb18-21"><a href="#cb18-21" aria-hidden="true" tabindex="-1"></a><span class="an">execute:</span></span>
+<span id="cb18-22"><a href="#cb18-22" aria-hidden="true" tabindex="-1"></a><span class="co">  warning: false</span></span>
+<span id="cb18-23"><a href="#cb18-23" aria-hidden="true" tabindex="-1"></a><span class="co">  message: false</span></span>
+<span id="cb18-24"><a href="#cb18-24" aria-hidden="true" tabindex="-1"></a><span class="co">  freeze: true</span></span>
+<span id="cb18-25"><a href="#cb18-25" aria-hidden="true" tabindex="-1"></a><span class="co">---</span></span>
+<span id="cb18-26"><a href="#cb18-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-29"><a href="#cb18-29" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-30"><a href="#cb18-30" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: packages</span></span>
+<span id="cb18-31"><a href="#cb18-31" aria-hidden="true" tabindex="-1"></a><span class="co">#| include: false</span></span>
+<span id="cb18-32"><a href="#cb18-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-33"><a href="#cb18-33" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(tidymodels)</span>
+<span id="cb18-34"><a href="#cb18-34" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(knitr)</span>
+<span id="cb18-35"><a href="#cb18-35" aria-hidden="true" tabindex="-1"></a><span class="fu">tidymodels_prefer</span>()</span>
+<span id="cb18-36"><a href="#cb18-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-37"><a href="#cb18-37" aria-hidden="true" tabindex="-1"></a><span class="co"># helper: pull one metric value out of a yardstick results table</span></span>
+<span id="cb18-38"><a href="#cb18-38" aria-hidden="true" tabindex="-1"></a>get_metric <span class="ot">&lt;-</span> <span class="cf">function</span>(results, metric_name) {</span>
+<span id="cb18-39"><a href="#cb18-39" aria-hidden="true" tabindex="-1"></a>  results <span class="sc">|&gt;</span> <span class="fu">filter</span>(.metric <span class="sc">==</span> metric_name) <span class="sc">|&gt;</span> <span class="fu">pull</span>(.estimate)</span>
+<span id="cb18-40"><a href="#cb18-40" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb18-41"><a href="#cb18-41" aria-hidden="true" tabindex="-1"></a>pct <span class="ot">&lt;-</span> <span class="cf">function</span>(x) scales<span class="sc">::</span><span class="fu">percent</span>(x, <span class="at">accuracy =</span> <span class="fl">0.1</span>)</span>
+<span id="cb18-42"><a href="#cb18-42" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-43"><a href="#cb18-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-44"><a href="#cb18-44" aria-hidden="true" tabindex="-1"></a><span class="fu"># Introduction</span></span>
+<span id="cb18-45"><a href="#cb18-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-46"><a href="#cb18-46" aria-hidden="true" tabindex="-1"></a>Chapter 9 of *Tidy Modeling with R* is about **judging how good a model really is**. A model is only useful to a marketer if its errors are understood: who it misses, who it wrongly targets, and how much those mistakes cost. In this report I work through the four exercises from the codebook using the <span class="in">`yardstick`</span> package, covering classification metrics, ROC/AUC, regression metrics, and multiclass averaging.</span>
+<span id="cb18-47"><a href="#cb18-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-48"><a href="#cb18-48" aria-hidden="true" tabindex="-1"></a><span class="fu">## Setup: The Direct-Mail Campaign Data</span></span>
+<span id="cb18-49"><a href="#cb18-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-50"><a href="#cb18-50" aria-hidden="true" tabindex="-1"></a>The exercises use three sets of predictions:</span>
+<span id="cb18-51"><a href="#cb18-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-52"><a href="#cb18-52" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span><span class="in">`test_preds`</span>: predicted response (<span class="in">`yes`</span>/<span class="in">`no`</span>) to a direct-mail campaign</span>
+<span id="cb18-53"><a href="#cb18-53" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span><span class="in">`reg_preds`</span>: predicted dollar value of each customer&#39;s next order</span>
+<span id="cb18-54"><a href="#cb18-54" aria-hidden="true" tabindex="-1"></a><span class="ss">3. </span><span class="in">`mc_preds`</span>: predicted loyalty tier (Bronze, Silver, Gold, Platinum)</span>
+<span id="cb18-55"><a href="#cb18-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-56"><a href="#cb18-56" aria-hidden="true" tabindex="-1"></a>The code below creates them so this report is fully reproducible.<span class="ot">[^setup]</span></span>
+<span id="cb18-57"><a href="#cb18-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-58"><a href="#cb18-58" aria-hidden="true" tabindex="-1"></a><span class="ot">[^setup]: </span>The data are simulated with a fixed seed to mirror the codebook&#39;s direct-mail example. All numbers in the text are calculated with inline R code, so they update automatically if the data change.</span>
+<span id="cb18-59"><a href="#cb18-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-62"><a href="#cb18-62" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-63"><a href="#cb18-63" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: setup-data</span></span>
+<span id="cb18-64"><a href="#cb18-64" aria-hidden="true" tabindex="-1"></a><span class="co">#| code-fold: true</span></span>
+<span id="cb18-65"><a href="#cb18-65" aria-hidden="true" tabindex="-1"></a><span class="co">#| code-summary: &quot;Show data setup code&quot;</span></span>
+<span id="cb18-66"><a href="#cb18-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-67"><a href="#cb18-67" aria-hidden="true" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">6540</span>)</span>
+<span id="cb18-68"><a href="#cb18-68" aria-hidden="true" tabindex="-1"></a>n <span class="ot">&lt;-</span> <span class="dv">2000</span></span>
+<span id="cb18-69"><a href="#cb18-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-70"><a href="#cb18-70" aria-hidden="true" tabindex="-1"></a>customers <span class="ot">&lt;-</span> <span class="fu">tibble</span>(</span>
+<span id="cb18-71"><a href="#cb18-71" aria-hidden="true" tabindex="-1"></a>  <span class="at">recency_days =</span> <span class="fu">runif</span>(n, <span class="dv">1</span>, <span class="dv">365</span>),</span>
+<span id="cb18-72"><a href="#cb18-72" aria-hidden="true" tabindex="-1"></a>  <span class="at">frequency    =</span> <span class="fu">rpois</span>(n, <span class="dv">3</span>),</span>
+<span id="cb18-73"><a href="#cb18-73" aria-hidden="true" tabindex="-1"></a>  <span class="at">email_opens  =</span> <span class="fu">rpois</span>(n, <span class="dv">4</span>),</span>
+<span id="cb18-74"><a href="#cb18-74" aria-hidden="true" tabindex="-1"></a>  <span class="at">avg_spend    =</span> <span class="fu">rgamma</span>(n, <span class="at">shape =</span> <span class="dv">2</span>, <span class="at">scale =</span> <span class="dv">40</span>)</span>
+<span id="cb18-75"><a href="#cb18-75" aria-hidden="true" tabindex="-1"></a>) <span class="sc">|&gt;</span></span>
+<span id="cb18-76"><a href="#cb18-76" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
+<span id="cb18-77"><a href="#cb18-77" aria-hidden="true" tabindex="-1"></a>    <span class="at">log_odds  =</span> <span class="sc">-</span><span class="fl">2.1</span> <span class="sc">-</span> <span class="fl">0.006</span> <span class="sc">*</span> recency_days <span class="sc">+</span> <span class="fl">0.35</span> <span class="sc">*</span> frequency <span class="sc">+</span></span>
+<span id="cb18-78"><a href="#cb18-78" aria-hidden="true" tabindex="-1"></a>                <span class="fl">0.18</span> <span class="sc">*</span> email_opens <span class="sc">+</span> <span class="fl">0.004</span> <span class="sc">*</span> avg_spend,</span>
+<span id="cb18-79"><a href="#cb18-79" aria-hidden="true" tabindex="-1"></a>    <span class="at">responded =</span> <span class="fu">factor</span>(<span class="fu">if_else</span>(<span class="fu">runif</span>(n) <span class="sc">&lt;</span> <span class="fu">plogis</span>(log_odds), <span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>),</span>
+<span id="cb18-80"><a href="#cb18-80" aria-hidden="true" tabindex="-1"></a>                       <span class="at">levels =</span> <span class="fu">c</span>(<span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>)),</span>
+<span id="cb18-81"><a href="#cb18-81" aria-hidden="true" tabindex="-1"></a>    <span class="at">order_value_next =</span> <span class="fu">pmax</span>(<span class="dv">5</span>, <span class="dv">20</span> <span class="sc">+</span> <span class="dv">8</span> <span class="sc">*</span> frequency <span class="sc">+</span> <span class="fl">0.5</span> <span class="sc">*</span> avg_spend <span class="sc">+</span> <span class="fu">rnorm</span>(n, <span class="dv">0</span>, <span class="dv">15</span>))</span>
+<span id="cb18-82"><a href="#cb18-82" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
+<span id="cb18-83"><a href="#cb18-83" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(<span class="sc">-</span>log_odds)</span>
+<span id="cb18-84"><a href="#cb18-84" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-85"><a href="#cb18-85" aria-hidden="true" tabindex="-1"></a>split <span class="ot">&lt;-</span> <span class="fu">initial_split</span>(customers, <span class="at">prop =</span> <span class="fl">0.75</span>, <span class="at">strata =</span> responded)</span>
+<span id="cb18-86"><a href="#cb18-86" aria-hidden="true" tabindex="-1"></a>train <span class="ot">&lt;-</span> <span class="fu">training</span>(split)</span>
+<span id="cb18-87"><a href="#cb18-87" aria-hidden="true" tabindex="-1"></a>test  <span class="ot">&lt;-</span> <span class="fu">testing</span>(split)</span>
+<span id="cb18-88"><a href="#cb18-88" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-89"><a href="#cb18-89" aria-hidden="true" tabindex="-1"></a><span class="co"># Classification model: will the customer respond?</span></span>
+<span id="cb18-90"><a href="#cb18-90" aria-hidden="true" tabindex="-1"></a>class_fit <span class="ot">&lt;-</span> <span class="fu">logistic_reg</span>() <span class="sc">|&gt;</span></span>
+<span id="cb18-91"><a href="#cb18-91" aria-hidden="true" tabindex="-1"></a>  <span class="fu">set_engine</span>(<span class="st">&quot;glm&quot;</span>) <span class="sc">|&gt;</span></span>
+<span id="cb18-92"><a href="#cb18-92" aria-hidden="true" tabindex="-1"></a>  <span class="fu">fit</span>(responded <span class="sc">~</span> recency_days <span class="sc">+</span> frequency <span class="sc">+</span> email_opens <span class="sc">+</span> avg_spend, <span class="at">data =</span> train)</span>
+<span id="cb18-93"><a href="#cb18-93" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-94"><a href="#cb18-94" aria-hidden="true" tabindex="-1"></a>test_preds <span class="ot">&lt;-</span> <span class="fu">augment</span>(class_fit, <span class="at">new_data =</span> test)</span>
+<span id="cb18-95"><a href="#cb18-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-96"><a href="#cb18-96" aria-hidden="true" tabindex="-1"></a><span class="co"># Regression model: how much will the next order be?</span></span>
+<span id="cb18-97"><a href="#cb18-97" aria-hidden="true" tabindex="-1"></a>reg_fit <span class="ot">&lt;-</span> <span class="fu">linear_reg</span>() <span class="sc">|&gt;</span></span>
+<span id="cb18-98"><a href="#cb18-98" aria-hidden="true" tabindex="-1"></a>  <span class="fu">fit</span>(order_value_next <span class="sc">~</span> frequency <span class="sc">+</span> avg_spend <span class="sc">+</span> email_opens, <span class="at">data =</span> train)</span>
+<span id="cb18-99"><a href="#cb18-99" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-100"><a href="#cb18-100" aria-hidden="true" tabindex="-1"></a>reg_preds <span class="ot">&lt;-</span> <span class="fu">augment</span>(reg_fit, <span class="at">new_data =</span> test) <span class="sc">|&gt;</span></span>
+<span id="cb18-101"><a href="#cb18-101" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(order_value_next, .pred)</span>
+<span id="cb18-102"><a href="#cb18-102" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-103"><a href="#cb18-103" aria-hidden="true" tabindex="-1"></a><span class="co"># Multiclass predictions: loyalty tier</span></span>
+<span id="cb18-104"><a href="#cb18-104" aria-hidden="true" tabindex="-1"></a>tiers <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;Bronze&quot;</span>, <span class="st">&quot;Silver&quot;</span>, <span class="st">&quot;Gold&quot;</span>, <span class="st">&quot;Platinum&quot;</span>)</span>
+<span id="cb18-105"><a href="#cb18-105" aria-hidden="true" tabindex="-1"></a>conf_probs <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb18-106"><a href="#cb18-106" aria-hidden="true" tabindex="-1"></a>  <span class="at">Bronze   =</span> <span class="fu">c</span>(<span class="fl">0.90</span>, <span class="fl">0.07</span>, <span class="fl">0.02</span>, <span class="fl">0.01</span>),</span>
+<span id="cb18-107"><a href="#cb18-107" aria-hidden="true" tabindex="-1"></a>  <span class="at">Silver   =</span> <span class="fu">c</span>(<span class="fl">0.35</span>, <span class="fl">0.55</span>, <span class="fl">0.08</span>, <span class="fl">0.02</span>),</span>
+<span id="cb18-108"><a href="#cb18-108" aria-hidden="true" tabindex="-1"></a>  <span class="at">Gold     =</span> <span class="fu">c</span>(<span class="fl">0.25</span>, <span class="fl">0.20</span>, <span class="fl">0.45</span>, <span class="fl">0.10</span>),</span>
+<span id="cb18-109"><a href="#cb18-109" aria-hidden="true" tabindex="-1"></a>  <span class="at">Platinum =</span> <span class="fu">c</span>(<span class="fl">0.20</span>, <span class="fl">0.15</span>, <span class="fl">0.30</span>, <span class="fl">0.35</span>)</span>
+<span id="cb18-110"><a href="#cb18-110" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb18-111"><a href="#cb18-111" aria-hidden="true" tabindex="-1"></a>truth_tier <span class="ot">&lt;-</span> <span class="fu">sample</span>(tiers, <span class="dv">1000</span>, <span class="at">replace =</span> <span class="cn">TRUE</span>, <span class="at">prob =</span> <span class="fu">c</span>(<span class="fl">0.60</span>, <span class="fl">0.25</span>, <span class="fl">0.10</span>, <span class="fl">0.05</span>))</span>
+<span id="cb18-112"><a href="#cb18-112" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-113"><a href="#cb18-113" aria-hidden="true" tabindex="-1"></a>mc_preds <span class="ot">&lt;-</span> <span class="fu">tibble</span>(</span>
+<span id="cb18-114"><a href="#cb18-114" aria-hidden="true" tabindex="-1"></a>  <span class="at">loyalty_tier =</span> <span class="fu">factor</span>(truth_tier, <span class="at">levels =</span> tiers),</span>
+<span id="cb18-115"><a href="#cb18-115" aria-hidden="true" tabindex="-1"></a>  <span class="at">.pred_class  =</span> <span class="fu">factor</span>(<span class="fu">map_chr</span>(truth_tier, \(t) <span class="fu">sample</span>(tiers, <span class="dv">1</span>, <span class="at">prob =</span> conf_probs[[t]])),</span>
+<span id="cb18-116"><a href="#cb18-116" aria-hidden="true" tabindex="-1"></a>                        <span class="at">levels =</span> tiers)</span>
+<span id="cb18-117"><a href="#cb18-117" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb18-118"><a href="#cb18-118" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-119"><a href="#cb18-119" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-120"><a href="#cb18-120" aria-hidden="true" tabindex="-1"></a>The test set has **`r nrow(test_preds)` customers**, and **`r pct(mean(test_preds$responded == &quot;yes&quot;))`** of them responded.</span>
+<span id="cb18-121"><a href="#cb18-121" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-122"><a href="#cb18-122" aria-hidden="true" tabindex="-1"></a><span class="fu"># Exercise 9.1: Confusion Matrix and Threshold Tradeoff</span></span>
+<span id="cb18-123"><a href="#cb18-123" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-124"><a href="#cb18-124" aria-hidden="true" tabindex="-1"></a><span class="fu">## Part A: Reading the Confusion Matrix</span></span>
+<span id="cb18-125"><a href="#cb18-125" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-126"><a href="#cb18-126" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:** Run </span><span class="in">`conf_mat(test_preds, truth = responded, estimate = .pred_class)`</span><span class="at"> and use the output to answer:</span></span>
+<span id="cb18-127"><a href="#cb18-127" aria-hidden="true" tabindex="-1"></a><span class="at">&gt;</span></span>
+<span id="cb18-128"><a href="#cb18-128" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 1. How many customers actually responded (&quot;yes&quot;) and were correctly predicted to respond? What is this cell called?</span></span>
+<span id="cb18-129"><a href="#cb18-129" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 2. How many customers actually responded but were predicted &quot;no&quot;? What is this cell called, and what does it cost a marketer?</span></span>
+<span id="cb18-130"><a href="#cb18-130" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 3. How many customers did not respond but were predicted &quot;yes&quot;? What is this cell called, and what does it cost a marketer?</span></span>
+<span id="cb18-131"><a href="#cb18-131" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 4. In plain English, which type of error is more costly for a direct-mail campaign with a \$5 mailing cost and \$50 average order value: a false positive or a false negative? Explain your reasoning.</span></span>
+<span id="cb18-132"><a href="#cb18-132" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-135"><a href="#cb18-135" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-136"><a href="#cb18-136" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: fig-conf-mat</span></span>
+<span id="cb18-137"><a href="#cb18-137" aria-hidden="true" tabindex="-1"></a><span class="co">#| fig-cap: &quot;Confusion matrix for the direct-mail response model (0.5 threshold)&quot;</span></span>
+<span id="cb18-138"><a href="#cb18-138" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-139"><a href="#cb18-139" aria-hidden="true" tabindex="-1"></a>cm <span class="ot">&lt;-</span> <span class="fu">conf_mat</span>(test_preds, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class)</span>
+<span id="cb18-140"><a href="#cb18-140" aria-hidden="true" tabindex="-1"></a>cm</span>
+<span id="cb18-141"><a href="#cb18-141" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-142"><a href="#cb18-142" aria-hidden="true" tabindex="-1"></a><span class="fu">autoplot</span>(cm, <span class="at">type =</span> <span class="st">&quot;heatmap&quot;</span>)</span>
+<span id="cb18-143"><a href="#cb18-143" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-144"><a href="#cb18-144" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-147"><a href="#cb18-147" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-148"><a href="#cb18-148" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: cm-cells</span></span>
+<span id="cb18-149"><a href="#cb18-149" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-150"><a href="#cb18-150" aria-hidden="true" tabindex="-1"></a>tp <span class="ot">&lt;-</span> cm<span class="sc">$</span>table[<span class="st">&quot;yes&quot;</span>, <span class="st">&quot;yes&quot;</span>]   <span class="co"># predicted yes, truly yes</span></span>
+<span id="cb18-151"><a href="#cb18-151" aria-hidden="true" tabindex="-1"></a>fn <span class="ot">&lt;-</span> cm<span class="sc">$</span>table[<span class="st">&quot;no&quot;</span>,  <span class="st">&quot;yes&quot;</span>]   <span class="co"># predicted no,  truly yes</span></span>
+<span id="cb18-152"><a href="#cb18-152" aria-hidden="true" tabindex="-1"></a>fp <span class="ot">&lt;-</span> cm<span class="sc">$</span>table[<span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>]    <span class="co"># predicted yes, truly no</span></span>
+<span id="cb18-153"><a href="#cb18-153" aria-hidden="true" tabindex="-1"></a>tn <span class="ot">&lt;-</span> cm<span class="sc">$</span>table[<span class="st">&quot;no&quot;</span>,  <span class="st">&quot;no&quot;</span>]    <span class="co"># predicted no,  truly no</span></span>
+<span id="cb18-154"><a href="#cb18-154" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-155"><a href="#cb18-155" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-156"><a href="#cb18-156" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Question <span class="pp">|</span> Count <span class="pp">|</span> Cell name <span class="pp">|</span> Cost to a marketer <span class="pp">|</span></span>
+<span id="cb18-157"><a href="#cb18-157" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span>:--<span class="pp">|</span>:--:<span class="pp">|</span>:--<span class="pp">|</span>:--<span class="pp">|</span></span>
+<span id="cb18-158"><a href="#cb18-158" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Responded **and** predicted &quot;yes&quot; | **`r tp`** <span class="pp">|</span> True Positive (TP) <span class="pp">|</span> None: a correct, profitable mailing <span class="pp">|</span></span>
+<span id="cb18-159"><a href="#cb18-159" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Responded **but** predicted &quot;no&quot; | **`r fn`** | False Negative (FN) | A **missed sale**: the customer would have bought, but we never mailed them <span class="pp">|</span></span>
+<span id="cb18-160"><a href="#cb18-160" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Did not respond **but** predicted &quot;yes&quot; | **`r fp`** | False Positive (FP) | A **wasted mailing**: we paid to mail someone who did not buy <span class="pp">|</span></span>
+<span id="cb18-161"><a href="#cb18-161" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-162"><a href="#cb18-162" aria-hidden="true" tabindex="-1"></a>: Reading the confusion matrix (@fig-conf-mat) {#tbl-cm}</span>
+<span id="cb18-163"><a href="#cb18-163" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-164"><a href="#cb18-164" aria-hidden="true" tabindex="-1"></a><span class="fu">### Which Error Is More Costly?</span></span>
+<span id="cb18-165"><a href="#cb18-165" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-166"><a href="#cb18-166" aria-hidden="true" tabindex="-1"></a>For this campaign, a **false negative is more costly**.</span>
+<span id="cb18-167"><a href="#cb18-167" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-168"><a href="#cb18-168" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>A **false positive** wastes one mailing: **\$5**.</span>
+<span id="cb18-169"><a href="#cb18-169" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>A **false negative** loses one order: **\$50** of revenue, which is **10 times more**.</span>
+<span id="cb18-170"><a href="#cb18-170" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-171"><a href="#cb18-171" aria-hidden="true" tabindex="-1"></a>So it is worth mailing a customer whenever their chance of responding is above the break-even point:</span>
+<span id="cb18-172"><a href="#cb18-172" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-173"><a href="#cb18-173" aria-hidden="true" tabindex="-1"></a>$$</span>
+<span id="cb18-174"><a href="#cb18-174" aria-hidden="true" tabindex="-1"></a>p \times \$50 &gt; \$5 \quad\Rightarrow\quad p &gt; \frac{5}{50} = 0.10</span>
+<span id="cb18-175"><a href="#cb18-175" aria-hidden="true" tabindex="-1"></a>$$ {#eq-breakeven}</span>
+<span id="cb18-176"><a href="#cb18-176" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-177"><a href="#cb18-177" aria-hidden="true" tabindex="-1"></a>::: {.callout-important}</span>
+<span id="cb18-178"><a href="#cb18-178" aria-hidden="true" tabindex="-1"></a><span class="fu">## Business Takeaway</span></span>
+<span id="cb18-179"><a href="#cb18-179" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-180"><a href="#cb18-180" aria-hidden="true" tabindex="-1"></a>@eq-breakeven shows the default 0.5 threshold is far too strict for this campaign. Any customer with more than a **10%** chance of responding is profitable to mail. Using 0.5 throws away many profitable customers just to avoid cheap \$5 mistakes.</span>
+<span id="cb18-181"><a href="#cb18-181" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-182"><a href="#cb18-182" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-183"><a href="#cb18-183" aria-hidden="true" tabindex="-1"></a><span class="fu">## Part B: Threshold Tradeoff</span></span>
+<span id="cb18-184"><a href="#cb18-184" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-185"><a href="#cb18-185" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:** Using </span><span class="in">`test_preds`</span><span class="at">, compute </span><span class="in">`precision`</span><span class="at"> and </span><span class="in">`sens`</span><span class="at"> at the default 0.5 threshold. Now manually create a new </span><span class="in">`.pred_class`</span><span class="at"> column using a threshold of 0.3 instead (classify as &quot;yes&quot; if </span><span class="in">`.pred_yes &gt; 0.3`</span><span class="at">). Recompute both metrics. Which one increased, and why does lowering the threshold have that effect?</span></span>
+<span id="cb18-186"><a href="#cb18-186" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-187"><a href="#cb18-187" aria-hidden="true" tabindex="-1"></a>Precision and sensitivity answer two different questions:</span>
+<span id="cb18-188"><a href="#cb18-188" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-189"><a href="#cb18-189" aria-hidden="true" tabindex="-1"></a>$$</span>
+<span id="cb18-190"><a href="#cb18-190" aria-hidden="true" tabindex="-1"></a>\text{Precision} = \frac{TP}{TP + FP} \qquad \text{Sensitivity} = \frac{TP}{TP + FN}</span>
+<span id="cb18-191"><a href="#cb18-191" aria-hidden="true" tabindex="-1"></a>$$ {#eq-prec-sens}</span>
+<span id="cb18-192"><a href="#cb18-192" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-195"><a href="#cb18-195" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-196"><a href="#cb18-196" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: threshold</span></span>
+<span id="cb18-197"><a href="#cb18-197" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-198"><a href="#cb18-198" aria-hidden="true" tabindex="-1"></a>prec_sens <span class="ot">&lt;-</span> <span class="fu">metric_set</span>(precision, sens)</span>
+<span id="cb18-199"><a href="#cb18-199" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-200"><a href="#cb18-200" aria-hidden="true" tabindex="-1"></a><span class="co"># Default 0.5 threshold</span></span>
+<span id="cb18-201"><a href="#cb18-201" aria-hidden="true" tabindex="-1"></a>at_05 <span class="ot">&lt;-</span> <span class="fu">prec_sens</span>(test_preds, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class)</span>
+<span id="cb18-202"><a href="#cb18-202" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-203"><a href="#cb18-203" aria-hidden="true" tabindex="-1"></a><span class="co"># Lower threshold of 0.3</span></span>
+<span id="cb18-204"><a href="#cb18-204" aria-hidden="true" tabindex="-1"></a>test_preds_03 <span class="ot">&lt;-</span> test_preds <span class="sc">|&gt;</span></span>
+<span id="cb18-205"><a href="#cb18-205" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">.pred_class =</span> <span class="fu">factor</span>(<span class="fu">if_else</span>(.pred_yes <span class="sc">&gt;</span> <span class="fl">0.3</span>, <span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>),</span>
+<span id="cb18-206"><a href="#cb18-206" aria-hidden="true" tabindex="-1"></a>                              <span class="at">levels =</span> <span class="fu">c</span>(<span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>)))</span>
+<span id="cb18-207"><a href="#cb18-207" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-208"><a href="#cb18-208" aria-hidden="true" tabindex="-1"></a>at_03 <span class="ot">&lt;-</span> <span class="fu">prec_sens</span>(test_preds_03, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class)</span>
+<span id="cb18-209"><a href="#cb18-209" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-210"><a href="#cb18-210" aria-hidden="true" tabindex="-1"></a>prec_05 <span class="ot">&lt;-</span> <span class="fu">get_metric</span>(at_05, <span class="st">&quot;precision&quot;</span>); sens_05 <span class="ot">&lt;-</span> <span class="fu">get_metric</span>(at_05, <span class="st">&quot;sens&quot;</span>)</span>
+<span id="cb18-211"><a href="#cb18-211" aria-hidden="true" tabindex="-1"></a>prec_03 <span class="ot">&lt;-</span> <span class="fu">get_metric</span>(at_03, <span class="st">&quot;precision&quot;</span>); sens_03 <span class="ot">&lt;-</span> <span class="fu">get_metric</span>(at_03, <span class="st">&quot;sens&quot;</span>)</span>
+<span id="cb18-212"><a href="#cb18-212" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-213"><a href="#cb18-213" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-216"><a href="#cb18-216" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-217"><a href="#cb18-217" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: tbl-threshold</span></span>
+<span id="cb18-218"><a href="#cb18-218" aria-hidden="true" tabindex="-1"></a><span class="co">#| tbl-cap: &quot;Precision and sensitivity at two thresholds&quot;</span></span>
+<span id="cb18-219"><a href="#cb18-219" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-220"><a href="#cb18-220" aria-hidden="true" tabindex="-1"></a><span class="fu">tibble</span>(</span>
+<span id="cb18-221"><a href="#cb18-221" aria-hidden="true" tabindex="-1"></a>  <span class="at">Metric =</span> <span class="fu">c</span>(<span class="st">&quot;Precision&quot;</span>, <span class="st">&quot;Sensitivity&quot;</span>),</span>
+<span id="cb18-222"><a href="#cb18-222" aria-hidden="true" tabindex="-1"></a>  <span class="st">`</span><span class="at">Threshold 0.5</span><span class="st">`</span> <span class="ot">=</span> <span class="fu">c</span>(prec_05, sens_05),</span>
+<span id="cb18-223"><a href="#cb18-223" aria-hidden="true" tabindex="-1"></a>  <span class="st">`</span><span class="at">Threshold 0.3</span><span class="st">`</span> <span class="ot">=</span> <span class="fu">c</span>(prec_03, sens_03),</span>
+<span id="cb18-224"><a href="#cb18-224" aria-hidden="true" tabindex="-1"></a>  <span class="at">Change =</span> <span class="fu">c</span>(prec_03 <span class="sc">-</span> prec_05, sens_03 <span class="sc">-</span> sens_05)</span>
+<span id="cb18-225"><a href="#cb18-225" aria-hidden="true" tabindex="-1"></a>) <span class="sc">|&gt;</span></span>
+<span id="cb18-226"><a href="#cb18-226" aria-hidden="true" tabindex="-1"></a>  <span class="fu">kable</span>(<span class="at">digits =</span> <span class="dv">3</span>)</span>
+<span id="cb18-227"><a href="#cb18-227" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-228"><a href="#cb18-228" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-229"><a href="#cb18-229" aria-hidden="true" tabindex="-1"></a>**Sensitivity increased** from <span class="in">`r pct(sens_05)`</span> to <span class="in">`r pct(sens_03)`</span>, while precision moved from <span class="in">`r pct(prec_05)`</span> to <span class="in">`r pct(prec_03)`</span> (@tbl-threshold).</span>
+<span id="cb18-230"><a href="#cb18-230" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-231"><a href="#cb18-231" aria-hidden="true" tabindex="-1"></a>**Why:** lowering the threshold makes the model label **more customers as &quot;yes&quot;**.</span>
+<span id="cb18-232"><a href="#cb18-232" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-233"><a href="#cb18-233" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Many of those newly flagged customers are real responders, so we **catch more of the buyers**. False negatives go down, and sensitivity goes up.</span>
+<span id="cb18-234"><a href="#cb18-234" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>But we also flag more non-responders, so a **smaller share of the mailed list actually buys**. False positives go up, and precision usually goes down.</span>
+<span id="cb18-235"><a href="#cb18-235" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-236"><a href="#cb18-236" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip}</span>
+<span id="cb18-237"><a href="#cb18-237" aria-hidden="true" tabindex="-1"></a><span class="fu">## Which Threshold Fits This Campaign?</span></span>
+<span id="cb18-238"><a href="#cb18-238" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-239"><a href="#cb18-239" aria-hidden="true" tabindex="-1"></a>Because a missed buyer (\$50) costs much more than a wasted mailing (\$5), trading some precision for higher sensitivity is the right move here. The 0.3 threshold is closer to the 0.10 break-even point from @eq-breakeven.</span>
+<span id="cb18-240"><a href="#cb18-240" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-241"><a href="#cb18-241" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-242"><a href="#cb18-242" aria-hidden="true" tabindex="-1"></a><span class="fu"># Exercise 9.2: ROC/AUC Interpretation and Custom `metric_set()`</span></span>
+<span id="cb18-243"><a href="#cb18-243" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-244"><a href="#cb18-244" aria-hidden="true" tabindex="-1"></a><span class="fu">## Part A: Interpreting AUC</span></span>
+<span id="cb18-245"><a href="#cb18-245" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-246"><a href="#cb18-246" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:**</span></span>
+<span id="cb18-247"><a href="#cb18-247" aria-hidden="true" tabindex="-1"></a><span class="at">&gt;</span></span>
+<span id="cb18-248"><a href="#cb18-248" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 1. Look up the AUC value from the roc-curve chunk. Is it above or below 0.65 (the &quot;usable for targeting&quot; threshold from the callout)?</span></span>
+<span id="cb18-249"><a href="#cb18-249" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 2. In plain English, what does an AUC of that value mean? Complete this sentence: &quot;If we randomly pick one customer who responded and one who did not, the model assigns a higher predicted probability to the responder ____% of the time.&quot;</span></span>
+<span id="cb18-250"><a href="#cb18-250" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 3. The ROC curve plot shows the sensitivity/specificity tradeoff across all thresholds. At what point on the curve would you operate if your campaign budget only allows you to mail the top 10% of prospects?</span></span>
+<span id="cb18-251"><a href="#cb18-251" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-254"><a href="#cb18-254" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-255"><a href="#cb18-255" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: auc</span></span>
+<span id="cb18-256"><a href="#cb18-256" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-257"><a href="#cb18-257" aria-hidden="true" tabindex="-1"></a>auc_val <span class="ot">&lt;-</span> <span class="fu">roc_auc</span>(test_preds, <span class="at">truth =</span> responded, .pred_yes) <span class="sc">|&gt;</span> <span class="fu">pull</span>(.estimate)</span>
+<span id="cb18-258"><a href="#cb18-258" aria-hidden="true" tabindex="-1"></a>auc_val</span>
+<span id="cb18-259"><a href="#cb18-259" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-260"><a href="#cb18-260" aria-hidden="true" tabindex="-1"></a><span class="co"># Operating point if we can only mail the top 10% of prospects</span></span>
+<span id="cb18-261"><a href="#cb18-261" aria-hidden="true" tabindex="-1"></a>cutoff_10 <span class="ot">&lt;-</span> <span class="fu">quantile</span>(test_preds<span class="sc">$</span>.pred_yes, <span class="fl">0.90</span>)</span>
+<span id="cb18-262"><a href="#cb18-262" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-263"><a href="#cb18-263" aria-hidden="true" tabindex="-1"></a>top10 <span class="ot">&lt;-</span> test_preds <span class="sc">|&gt;</span></span>
+<span id="cb18-264"><a href="#cb18-264" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="at">.pred_class =</span> <span class="fu">factor</span>(<span class="fu">if_else</span>(.pred_yes <span class="sc">&gt;=</span> cutoff_10, <span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>),</span>
+<span id="cb18-265"><a href="#cb18-265" aria-hidden="true" tabindex="-1"></a>                              <span class="at">levels =</span> <span class="fu">c</span>(<span class="st">&quot;yes&quot;</span>, <span class="st">&quot;no&quot;</span>)))</span>
+<span id="cb18-266"><a href="#cb18-266" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-267"><a href="#cb18-267" aria-hidden="true" tabindex="-1"></a>sens_10 <span class="ot">&lt;-</span> <span class="fu">sens</span>(top10, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class) <span class="sc">|&gt;</span> <span class="fu">pull</span>(.estimate)</span>
+<span id="cb18-268"><a href="#cb18-268" aria-hidden="true" tabindex="-1"></a>spec_10 <span class="ot">&lt;-</span> <span class="fu">spec</span>(top10, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class) <span class="sc">|&gt;</span> <span class="fu">pull</span>(.estimate)</span>
+<span id="cb18-269"><a href="#cb18-269" aria-hidden="true" tabindex="-1"></a>prec_10 <span class="ot">&lt;-</span> <span class="fu">precision</span>(top10, <span class="at">truth =</span> responded, <span class="at">estimate =</span> .pred_class) <span class="sc">|&gt;</span> <span class="fu">pull</span>(.estimate)</span>
+<span id="cb18-270"><a href="#cb18-270" aria-hidden="true" tabindex="-1"></a>base_rate <span class="ot">&lt;-</span> <span class="fu">mean</span>(test_preds<span class="sc">$</span>responded <span class="sc">==</span> <span class="st">&quot;yes&quot;</span>)</span>
+<span id="cb18-271"><a href="#cb18-271" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-272"><a href="#cb18-272" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-275"><a href="#cb18-275" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-276"><a href="#cb18-276" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: fig-roc</span></span>
+<span id="cb18-277"><a href="#cb18-277" aria-hidden="true" tabindex="-1"></a><span class="co">#| fig-cap: &quot;ROC curve with the top-10% mailing operating point marked in red&quot;</span></span>
+<span id="cb18-278"><a href="#cb18-278" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-279"><a href="#cb18-279" aria-hidden="true" tabindex="-1"></a><span class="fu">roc_curve</span>(test_preds, <span class="at">truth =</span> responded, .pred_yes) <span class="sc">|&gt;</span></span>
+<span id="cb18-280"><a href="#cb18-280" aria-hidden="true" tabindex="-1"></a>  <span class="fu">autoplot</span>() <span class="sc">+</span></span>
+<span id="cb18-281"><a href="#cb18-281" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_point</span>(<span class="at">data =</span> <span class="fu">tibble</span>(<span class="at">x =</span> <span class="dv">1</span> <span class="sc">-</span> spec_10, <span class="at">y =</span> sens_10),</span>
+<span id="cb18-282"><a href="#cb18-282" aria-hidden="true" tabindex="-1"></a>             <span class="fu">aes</span>(<span class="at">x =</span> x, <span class="at">y =</span> y), <span class="at">inherit.aes =</span> <span class="cn">FALSE</span>,</span>
+<span id="cb18-283"><a href="#cb18-283" aria-hidden="true" tabindex="-1"></a>             <span class="at">color =</span> <span class="st">&quot;red&quot;</span>, <span class="at">size =</span> <span class="dv">4</span>) <span class="sc">+</span></span>
+<span id="cb18-284"><a href="#cb18-284" aria-hidden="true" tabindex="-1"></a>  <span class="fu">annotate</span>(<span class="st">&quot;text&quot;</span>, <span class="at">x =</span> <span class="dv">1</span> <span class="sc">-</span> spec_10 <span class="sc">+</span> <span class="fl">0.04</span>, <span class="at">y =</span> sens_10,</span>
+<span id="cb18-285"><a href="#cb18-285" aria-hidden="true" tabindex="-1"></a>           <span class="at">label =</span> <span class="st">&quot;Top 10% mailed&quot;</span>, <span class="at">hjust =</span> <span class="dv">0</span>, <span class="at">color =</span> <span class="st">&quot;red&quot;</span>)</span>
+<span id="cb18-286"><a href="#cb18-286" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-287"><a href="#cb18-287" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-288"><a href="#cb18-288" aria-hidden="true" tabindex="-1"></a>**1. Is it usable?** The AUC is **`r round(auc_val, 3)`**, which is **`r if (auc_val &gt;= 0.65) &quot;above&quot; else &quot;below&quot;`** the 0.65 &quot;usable for targeting&quot; threshold. <span class="in">`r if (auc_val &gt;= 0.65) &quot;The model ranks customers well enough to guide who gets mailed.&quot; else &quot;The model is not yet reliable enough to guide targeting.&quot;`</span></span>
+<span id="cb18-289"><a href="#cb18-289" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-290"><a href="#cb18-290" aria-hidden="true" tabindex="-1"></a>**2. Plain-English meaning:**</span>
+<span id="cb18-291"><a href="#cb18-291" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-292"><a href="#cb18-292" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; &quot;If we randomly pick one customer who responded and one who did not, the model assigns a higher predicted probability to the responder **`r round(auc_val * 100, 1)`%** of the time.&quot;</span></span>
+<span id="cb18-293"><a href="#cb18-293" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-294"><a href="#cb18-294" aria-hidden="true" tabindex="-1"></a>An AUC of 0.5 would be a coin flip and 1.0 would be perfect ranking, so this model is clearly better than random at **sorting** prospects from most to least likely to respond.</span>
+<span id="cb18-295"><a href="#cb18-295" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-296"><a href="#cb18-296" aria-hidden="true" tabindex="-1"></a>**3. Operating point for the top 10%:** If the budget only covers the top 10% of prospects, I would mail everyone with a predicted probability of at least **`r round(cutoff_10, 3)`**. That is the red point in @fig-roc, near the **lower-left** of the curve:</span>
+<span id="cb18-297"><a href="#cb18-297" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-298"><a href="#cb18-298" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Specificity** is high (<span class="in">`r pct(spec_10)`</span>): almost no non-responders get mailed.</span>
+<span id="cb18-299"><a href="#cb18-299" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Sensitivity** is low (<span class="in">`r pct(sens_10)`</span>): we only reach a small share of all responders, because we mail so few people.</span>
+<span id="cb18-300"><a href="#cb18-300" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>The response rate among mailed customers is **`r pct(prec_10)`**, compared with **`r pct(base_rate)`** if we mailed people at random. That is a **lift of `r round(prec_10 / base_rate, 2)`×**.<span class="ot">[^lift]</span></span>
+<span id="cb18-301"><a href="#cb18-301" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-302"><a href="#cb18-302" aria-hidden="true" tabindex="-1"></a><span class="ot">[^lift]: </span>Lift = response rate among the targeted group ÷ overall response rate. It is one of the most common ways marketers judge a targeting model.</span>
+<span id="cb18-303"><a href="#cb18-303" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-304"><a href="#cb18-304" aria-hidden="true" tabindex="-1"></a><span class="fu">## Part B: Custom `metric_set()`</span></span>
+<span id="cb18-305"><a href="#cb18-305" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-306"><a href="#cb18-306" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:** Create a </span><span class="in">`metric_set()`</span><span class="at"> containing accuracy, roc_auc, sens, spec, and f_meas. Apply it to </span><span class="in">`test_preds`</span><span class="at">. If you had to report just two of these five numbers to a VP of Marketing who is unfamiliar with machine learning metrics, which would you choose and why?</span></span>
+<span id="cb18-307"><a href="#cb18-307" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-310"><a href="#cb18-310" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-311"><a href="#cb18-311" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: tbl-metric-set</span></span>
+<span id="cb18-312"><a href="#cb18-312" aria-hidden="true" tabindex="-1"></a><span class="co">#| tbl-cap: &quot;Five evaluation metrics for the direct-mail model&quot;</span></span>
+<span id="cb18-313"><a href="#cb18-313" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-314"><a href="#cb18-314" aria-hidden="true" tabindex="-1"></a>campaign_metrics <span class="ot">&lt;-</span> <span class="fu">metric_set</span>(accuracy, roc_auc, sens, spec, f_meas)</span>
+<span id="cb18-315"><a href="#cb18-315" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-316"><a href="#cb18-316" aria-hidden="true" tabindex="-1"></a>all_metrics <span class="ot">&lt;-</span> <span class="fu">campaign_metrics</span>(test_preds, <span class="at">truth =</span> responded,</span>
+<span id="cb18-317"><a href="#cb18-317" aria-hidden="true" tabindex="-1"></a>                                <span class="at">estimate =</span> .pred_class, .pred_yes)</span>
+<span id="cb18-318"><a href="#cb18-318" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-319"><a href="#cb18-319" aria-hidden="true" tabindex="-1"></a>all_metrics <span class="sc">|&gt;</span> <span class="fu">kable</span>(<span class="at">digits =</span> <span class="dv">3</span>)</span>
+<span id="cb18-320"><a href="#cb18-320" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-321"><a href="#cb18-321" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-322"><a href="#cb18-322" aria-hidden="true" tabindex="-1"></a>::: {.panel-tabset}</span>
+<span id="cb18-323"><a href="#cb18-323" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-324"><a href="#cb18-324" aria-hidden="true" tabindex="-1"></a><span class="fu">### My Two Picks</span></span>
+<span id="cb18-325"><a href="#cb18-325" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-326"><a href="#cb18-326" aria-hidden="true" tabindex="-1"></a>I would report **AUC** and **sensitivity**:</span>
+<span id="cb18-327"><a href="#cb18-327" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-328"><a href="#cb18-328" aria-hidden="true" tabindex="-1"></a><span class="ss">1. </span>**AUC (`r round(auc_val, 3)`):** &quot;How good is the model at putting the best prospects at the top of the list?&quot; Direct mail is a **ranking** problem: we mail from the top down until the budget runs out. AUC measures exactly that.</span>
+<span id="cb18-329"><a href="#cb18-329" aria-hidden="true" tabindex="-1"></a><span class="ss">2. </span>**Sensitivity (`r pct(get_metric(all_metrics, &quot;sens&quot;))`):** &quot;What share of the people who would buy does our mailing actually reach?&quot; Because a missed buyer costs \$50 versus a \$5 mailing, this is the number tied most directly to lost revenue.</span>
+<span id="cb18-330"><a href="#cb18-330" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-331"><a href="#cb18-331" aria-hidden="true" tabindex="-1"></a><span class="fu">### Why Not the Others?</span></span>
+<span id="cb18-332"><a href="#cb18-332" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-333"><a href="#cb18-333" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Accuracy** can be misleading. If most customers do not respond, a model that predicts &quot;no&quot; for everyone looks accurate but finds zero buyers.</span>
+<span id="cb18-334"><a href="#cb18-334" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Specificity** measures how well we avoid non-responders, which matters less when mailings are cheap.</span>
+<span id="cb18-335"><a href="#cb18-335" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**F-measure** blends precision and sensitivity into one number that is hard to explain without a statistics background.</span>
+<span id="cb18-336"><a href="#cb18-336" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-337"><a href="#cb18-337" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-338"><a href="#cb18-338" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-339"><a href="#cb18-339" aria-hidden="true" tabindex="-1"></a><span class="fu"># Exercise 9.3: Regression Metric Sensitivity to Outliers</span></span>
+<span id="cb18-340"><a href="#cb18-340" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-341"><a href="#cb18-341" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:** Add one synthetic &quot;whale&quot; customer to </span><span class="in">`reg_preds`</span><span class="at"> with </span><span class="in">`order_value_next = 5000`</span><span class="at"> and </span><span class="in">`.pred = 200`</span><span class="at"> (a badly missed prediction). Recompute rmse and mae. Which metric moved more in percentage terms? What does this tell you about choosing RMSE vs. MAE for marketing data with occasional huge orders?</span></span>
+<span id="cb18-342"><a href="#cb18-342" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-343"><a href="#cb18-343" aria-hidden="true" tabindex="-1"></a>$$</span>
+<span id="cb18-344"><a href="#cb18-344" aria-hidden="true" tabindex="-1"></a>\text{RMSE} = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2} \qquad</span>
+<span id="cb18-345"><a href="#cb18-345" aria-hidden="true" tabindex="-1"></a>\text{MAE} = \frac{1}{n}\sum_{i=1}^{n}\lvert y_i - \hat{y}_i \rvert</span>
+<span id="cb18-346"><a href="#cb18-346" aria-hidden="true" tabindex="-1"></a>$$ {#eq-rmse-mae}</span>
+<span id="cb18-347"><a href="#cb18-347" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-350"><a href="#cb18-350" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-351"><a href="#cb18-351" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: whale</span></span>
+<span id="cb18-352"><a href="#cb18-352" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-353"><a href="#cb18-353" aria-hidden="true" tabindex="-1"></a>reg_metrics <span class="ot">&lt;-</span> <span class="fu">metric_set</span>(rmse, mae)</span>
+<span id="cb18-354"><a href="#cb18-354" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-355"><a href="#cb18-355" aria-hidden="true" tabindex="-1"></a>before <span class="ot">&lt;-</span> <span class="fu">reg_metrics</span>(reg_preds, <span class="at">truth =</span> order_value_next, <span class="at">estimate =</span> .pred)</span>
+<span id="cb18-356"><a href="#cb18-356" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-357"><a href="#cb18-357" aria-hidden="true" tabindex="-1"></a>reg_preds_whale <span class="ot">&lt;-</span> reg_preds <span class="sc">|&gt;</span></span>
+<span id="cb18-358"><a href="#cb18-358" aria-hidden="true" tabindex="-1"></a>  <span class="fu">bind_rows</span>(<span class="fu">tibble</span>(<span class="at">order_value_next =</span> <span class="dv">5000</span>, <span class="at">.pred =</span> <span class="dv">200</span>))</span>
+<span id="cb18-359"><a href="#cb18-359" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-360"><a href="#cb18-360" aria-hidden="true" tabindex="-1"></a>after <span class="ot">&lt;-</span> <span class="fu">reg_metrics</span>(reg_preds_whale, <span class="at">truth =</span> order_value_next, <span class="at">estimate =</span> .pred)</span>
+<span id="cb18-361"><a href="#cb18-361" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-362"><a href="#cb18-362" aria-hidden="true" tabindex="-1"></a>whale_tbl <span class="ot">&lt;-</span> <span class="fu">tibble</span>(</span>
+<span id="cb18-363"><a href="#cb18-363" aria-hidden="true" tabindex="-1"></a>  <span class="at">Metric   =</span> <span class="fu">c</span>(<span class="st">&quot;RMSE&quot;</span>, <span class="st">&quot;MAE&quot;</span>),</span>
+<span id="cb18-364"><a href="#cb18-364" aria-hidden="true" tabindex="-1"></a>  <span class="at">Before   =</span> <span class="fu">c</span>(<span class="fu">get_metric</span>(before, <span class="st">&quot;rmse&quot;</span>), <span class="fu">get_metric</span>(before, <span class="st">&quot;mae&quot;</span>)),</span>
+<span id="cb18-365"><a href="#cb18-365" aria-hidden="true" tabindex="-1"></a>  <span class="at">After    =</span> <span class="fu">c</span>(<span class="fu">get_metric</span>(after, <span class="st">&quot;rmse&quot;</span>),  <span class="fu">get_metric</span>(after, <span class="st">&quot;mae&quot;</span>))</span>
+<span id="cb18-366"><a href="#cb18-366" aria-hidden="true" tabindex="-1"></a>) <span class="sc">|&gt;</span></span>
+<span id="cb18-367"><a href="#cb18-367" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="st">`</span><span class="at">% Change</span><span class="st">`</span> <span class="ot">=</span> (After <span class="sc">-</span> Before) <span class="sc">/</span> Before <span class="sc">*</span> <span class="dv">100</span>)</span>
+<span id="cb18-368"><a href="#cb18-368" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-369"><a href="#cb18-369" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-372"><a href="#cb18-372" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-373"><a href="#cb18-373" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: tbl-whale</span></span>
+<span id="cb18-374"><a href="#cb18-374" aria-hidden="true" tabindex="-1"></a><span class="co">#| tbl-cap: &quot;Effect of one whale customer on RMSE and MAE&quot;</span></span>
+<span id="cb18-375"><a href="#cb18-375" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-376"><a href="#cb18-376" aria-hidden="true" tabindex="-1"></a><span class="fu">kable</span>(whale_tbl, <span class="at">digits =</span> <span class="dv">2</span>)</span>
+<span id="cb18-377"><a href="#cb18-377" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-378"><a href="#cb18-378" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-381"><a href="#cb18-381" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-382"><a href="#cb18-382" aria-hidden="true" tabindex="-1"></a><span class="co">#| include: false</span></span>
+<span id="cb18-383"><a href="#cb18-383" aria-hidden="true" tabindex="-1"></a>rmse_chg <span class="ot">&lt;-</span> whale_tbl<span class="sc">$</span><span class="st">`</span><span class="at">% Change</span><span class="st">`</span>[<span class="dv">1</span>]</span>
+<span id="cb18-384"><a href="#cb18-384" aria-hidden="true" tabindex="-1"></a>mae_chg  <span class="ot">&lt;-</span> whale_tbl<span class="sc">$</span><span class="st">`</span><span class="at">% Change</span><span class="st">`</span>[<span class="dv">2</span>]</span>
+<span id="cb18-385"><a href="#cb18-385" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-386"><a href="#cb18-386" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-387"><a href="#cb18-387" aria-hidden="true" tabindex="-1"></a>Adding **one** customer out of `r nrow(reg_preds_whale)` made **RMSE jump by `r round(rmse_chg, 1)`%**, while **MAE rose by only `r round(mae_chg, 1)`%** (@tbl-whale). RMSE moved about **`r round(rmse_chg / mae_chg, 1)` times more**.</span>
+<span id="cb18-388"><a href="#cb18-388" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-389"><a href="#cb18-389" aria-hidden="true" tabindex="-1"></a>**Why:** as @eq-rmse-mae shows, RMSE **squares** each error before averaging. The whale&#39;s \$4,800 miss becomes 4,800² ≈ 23 million, which swamps everyone else. MAE takes the plain absolute value, so the whale counts as just one large error.</span>
+<span id="cb18-390"><a href="#cb18-390" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-391"><a href="#cb18-391" aria-hidden="true" tabindex="-1"></a>::: {.callout-note}</span>
+<span id="cb18-392"><a href="#cb18-392" aria-hidden="true" tabindex="-1"></a><span class="fu">## Choosing RMSE vs. MAE for Marketing Data</span></span>
+<span id="cb18-393"><a href="#cb18-393" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-394"><a href="#cb18-394" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Use **MAE** when I want a stable, easy-to-explain number (&quot;on average we are off by \$X per order&quot;) and do not want a few unusual orders to dominate the evaluation.</span>
+<span id="cb18-395"><a href="#cb18-395" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Use **RMSE** when big misses are **especially costly**, for example forecasting inventory for a VIP account where under-predicting a huge order is a serious problem.</span>
+<span id="cb18-396"><a href="#cb18-396" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Marketing data often has a **long right tail** (a few huge orders), so I would report **both**. A big gap between RMSE and MAE is itself a signal that outliers are present.</span>
+<span id="cb18-397"><a href="#cb18-397" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-398"><a href="#cb18-398" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-399"><a href="#cb18-399" aria-hidden="true" tabindex="-1"></a><span class="fu"># Exercise 9.4: Multiclass Averaging</span></span>
+<span id="cb18-400"><a href="#cb18-400" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-401"><a href="#cb18-401" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; **Prompt:** Re-run the multiclass loyalty_tier example using </span><span class="in">`estimator = &quot;micro&quot;`</span><span class="at"> instead of the default macro averaging for sens. Also run it with </span><span class="in">`estimator = &quot;macro_weighted&quot;`</span><span class="at">. Compare all three numbers.</span></span>
+<span id="cb18-402"><a href="#cb18-402" aria-hidden="true" tabindex="-1"></a><span class="at">&gt;</span></span>
+<span id="cb18-403"><a href="#cb18-403" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 1. Why might micro-averaging look more favorable when one class (Bronze) is much larger than the others?</span></span>
+<span id="cb18-404"><a href="#cb18-404" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 2. Which estimator would you choose if you wanted to ensure that Platinum customers, the rarest and most valuable tier, are not underrepresented in the metric? Explain your reasoning.</span></span>
+<span id="cb18-405"><a href="#cb18-405" aria-hidden="true" tabindex="-1"></a><span class="at">&gt; 3. In a marketing context, which averaging method is most likely to give a misleadingly optimistic picture of model performance? Why?</span></span>
+<span id="cb18-406"><a href="#cb18-406" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-409"><a href="#cb18-409" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-410"><a href="#cb18-410" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: multiclass</span></span>
+<span id="cb18-411"><a href="#cb18-411" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-412"><a href="#cb18-412" aria-hidden="true" tabindex="-1"></a>sens_macro    <span class="ot">&lt;-</span> <span class="fu">sens</span>(mc_preds, <span class="at">truth =</span> loyalty_tier, <span class="at">estimate =</span> .pred_class)</span>
+<span id="cb18-413"><a href="#cb18-413" aria-hidden="true" tabindex="-1"></a>sens_micro    <span class="ot">&lt;-</span> <span class="fu">sens</span>(mc_preds, <span class="at">truth =</span> loyalty_tier, <span class="at">estimate =</span> .pred_class,</span>
+<span id="cb18-414"><a href="#cb18-414" aria-hidden="true" tabindex="-1"></a>                      <span class="at">estimator =</span> <span class="st">&quot;micro&quot;</span>)</span>
+<span id="cb18-415"><a href="#cb18-415" aria-hidden="true" tabindex="-1"></a>sens_weighted <span class="ot">&lt;-</span> <span class="fu">sens</span>(mc_preds, <span class="at">truth =</span> loyalty_tier, <span class="at">estimate =</span> .pred_class,</span>
+<span id="cb18-416"><a href="#cb18-416" aria-hidden="true" tabindex="-1"></a>                      <span class="at">estimator =</span> <span class="st">&quot;macro_weighted&quot;</span>)</span>
+<span id="cb18-417"><a href="#cb18-417" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-418"><a href="#cb18-418" aria-hidden="true" tabindex="-1"></a>mc_compare <span class="ot">&lt;-</span> <span class="fu">bind_rows</span>(sens_macro, sens_micro, sens_weighted)</span>
+<span id="cb18-419"><a href="#cb18-419" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-420"><a href="#cb18-420" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-421"><a href="#cb18-421" aria-hidden="true" tabindex="-1"></a>::: {.panel-tabset}</span>
+<span id="cb18-422"><a href="#cb18-422" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-423"><a href="#cb18-423" aria-hidden="true" tabindex="-1"></a><span class="fu">### Three Averages</span></span>
+<span id="cb18-424"><a href="#cb18-424" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-427"><a href="#cb18-427" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-428"><a href="#cb18-428" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: tbl-mc-compare</span></span>
+<span id="cb18-429"><a href="#cb18-429" aria-hidden="true" tabindex="-1"></a><span class="co">#| tbl-cap: &quot;Sensitivity under three averaging methods&quot;</span></span>
+<span id="cb18-430"><a href="#cb18-430" aria-hidden="true" tabindex="-1"></a><span class="fu">kable</span>(mc_compare, <span class="at">digits =</span> <span class="dv">3</span>)</span>
+<span id="cb18-431"><a href="#cb18-431" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-432"><a href="#cb18-432" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-433"><a href="#cb18-433" aria-hidden="true" tabindex="-1"></a><span class="fu">### Per-Tier Sensitivity</span></span>
+<span id="cb18-434"><a href="#cb18-434" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-437"><a href="#cb18-437" aria-hidden="true" tabindex="-1"></a><span class="in">```{r}</span></span>
+<span id="cb18-438"><a href="#cb18-438" aria-hidden="true" tabindex="-1"></a><span class="co">#| label: tbl-per-tier</span></span>
+<span id="cb18-439"><a href="#cb18-439" aria-hidden="true" tabindex="-1"></a><span class="co">#| tbl-cap: &quot;Sensitivity (recall) for each loyalty tier&quot;</span></span>
+<span id="cb18-440"><a href="#cb18-440" aria-hidden="true" tabindex="-1"></a>mc_preds <span class="sc">|&gt;</span></span>
+<span id="cb18-441"><a href="#cb18-441" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(loyalty_tier) <span class="sc">|&gt;</span></span>
+<span id="cb18-442"><a href="#cb18-442" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">customers =</span> <span class="fu">n</span>(),</span>
+<span id="cb18-443"><a href="#cb18-443" aria-hidden="true" tabindex="-1"></a>            <span class="at">share =</span> <span class="fu">n</span>() <span class="sc">/</span> <span class="fu">nrow</span>(mc_preds),</span>
+<span id="cb18-444"><a href="#cb18-444" aria-hidden="true" tabindex="-1"></a>            <span class="at">sensitivity =</span> <span class="fu">mean</span>(.pred_class <span class="sc">==</span> loyalty_tier)) <span class="sc">|&gt;</span></span>
+<span id="cb18-445"><a href="#cb18-445" aria-hidden="true" tabindex="-1"></a>  <span class="fu">kable</span>(<span class="at">digits =</span> <span class="dv">3</span>)</span>
+<span id="cb18-446"><a href="#cb18-446" aria-hidden="true" tabindex="-1"></a><span class="in">```</span></span>
+<span id="cb18-447"><a href="#cb18-447" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-448"><a href="#cb18-448" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-449"><a href="#cb18-449" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-450"><a href="#cb18-450" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Estimator <span class="pp">|</span> Sensitivity <span class="pp">|</span> How each tier is weighted <span class="pp">|</span></span>
+<span id="cb18-451"><a href="#cb18-451" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span>:--<span class="pp">|</span>:--:<span class="pp">|</span>:--<span class="pp">|</span></span>
+<span id="cb18-452"><a href="#cb18-452" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Macro (default) <span class="pp">|</span> <span class="in">`r round(sens_macro$.estimate, 3)`</span> <span class="pp">|</span> Every tier counts **equally** (25% each) <span class="pp">|</span></span>
+<span id="cb18-453"><a href="#cb18-453" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Micro <span class="pp">|</span> <span class="in">`r round(sens_micro$.estimate, 3)`</span> <span class="pp">|</span> Every **customer** counts equally, so big tiers dominate <span class="pp">|</span></span>
+<span id="cb18-454"><a href="#cb18-454" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Macro-weighted <span class="pp">|</span> <span class="in">`r round(sens_weighted$.estimate, 3)`</span> <span class="pp">|</span> Each tier weighted by its **share of customers** <span class="pp">|</span></span>
+<span id="cb18-455"><a href="#cb18-455" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-456"><a href="#cb18-456" aria-hidden="true" tabindex="-1"></a>: Summary of the three averaging methods {#tbl-mc-summary}</span>
+<span id="cb18-457"><a href="#cb18-457" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-458"><a href="#cb18-458" aria-hidden="true" tabindex="-1"></a>**1. Why micro looks more favorable:** micro-averaging pools every customer together before computing sensitivity, so each tier&#39;s influence is proportional to its size. Bronze makes up about 60% of customers, and the model predicts Bronze well (@tbl-per-tier). That strong Bronze performance dominates the average and hides the weak results on Gold and Platinum. Micro and macro-weighted sensitivity come out **identical** in @tbl-mc-summary. For sensitivity, weighting each tier&#39;s recall by its share of customers is mathematically the same as pooling all customers.<span class="ot">[^micro]</span></span>
+<span id="cb18-459"><a href="#cb18-459" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-460"><a href="#cb18-460" aria-hidden="true" tabindex="-1"></a><span class="ot">[^micro]: </span>For multiclass sensitivity, both micro and macro-weighted averaging reduce to total correct predictions ÷ total customers, which is the same as overall accuracy.</span>
+<span id="cb18-461"><a href="#cb18-461" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-462"><a href="#cb18-462" aria-hidden="true" tabindex="-1"></a>**2. Protecting Platinum:** I would choose **macro averaging**. It gives every tier the **same weight**, so Platinum counts for 25% of the score even though it is only about 5% of customers. If the model does poorly on Platinum, the macro score drops noticeably, which is what I want, because Platinum customers are the most valuable to identify correctly.</span>
+<span id="cb18-463"><a href="#cb18-463" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-464"><a href="#cb18-464" aria-hidden="true" tabindex="-1"></a>**3. The misleadingly optimistic method:** **Micro averaging** (and macro-weighted, which matches it here) is the most likely to mislead. In loyalty programs, the high-value tiers are almost always the smallest, so a model can score well just by getting the large, low-value Bronze tier right while badly misclassifying VIPs. A marketer seeing a high micro score might wrongly believe the model can be trusted to find Platinum customers for a premium campaign.</span>
+<span id="cb18-465"><a href="#cb18-465" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-466"><a href="#cb18-466" aria-hidden="true" tabindex="-1"></a>::: {.callout-warning}</span>
+<span id="cb18-467"><a href="#cb18-467" aria-hidden="true" tabindex="-1"></a><span class="fu">## Lesson</span></span>
+<span id="cb18-468"><a href="#cb18-468" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-469"><a href="#cb18-469" aria-hidden="true" tabindex="-1"></a>Always check **per-class** results, not just one averaged number. In marketing, the classes we care most about (VIPs, churners, responders) are often the rare ones.</span>
+<span id="cb18-470"><a href="#cb18-470" aria-hidden="true" tabindex="-1"></a>:::</span>
+<span id="cb18-471"><a href="#cb18-471" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-472"><a href="#cb18-472" aria-hidden="true" tabindex="-1"></a><span class="fu"># Conclusion</span></span>
+<span id="cb18-473"><a href="#cb18-473" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-474"><a href="#cb18-474" aria-hidden="true" tabindex="-1"></a>This chapter showed me that &quot;how good is the model?&quot; depends on the **business question**. The confusion matrix and threshold choice should reflect the real costs of each error. AUC tells me how well the model ranks prospects, which is what matters when mailing from the top of a list. MAE and RMSE react very differently to the occasional huge order. And in multiclass problems, the averaging method can hide poor performance on the most valuable customers.</span>
+<span id="cb18-475"><a href="#cb18-475" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-476"><a href="#cb18-476" aria-hidden="true" tabindex="-1"></a><span class="fu"># Tool Use</span></span>
+<span id="cb18-477"><a href="#cb18-477" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-478"><a href="#cb18-478" aria-hidden="true" tabindex="-1"></a>I used Claude (Anthropic) to help organize this report, build the reproducible example data, and check the R code. I reviewed every step and can explain each metric and line of code on my own.</span>
+<span id="cb18-479"><a href="#cb18-479" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-480"><a href="#cb18-480" aria-hidden="true" tabindex="-1"></a><span class="fu"># Appendix</span></span>
+<span id="cb18-481"><a href="#cb18-481" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-482"><a href="#cb18-482" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Published report (GitHub Pages):** <span class="ot">&lt;https://buenoalexa11.github.io/IBM6540-Reports/M05%20Reflection%20on%20Ch09%20Evaluation.html&gt;</span></span>
+<span id="cb18-483"><a href="#cb18-483" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**GitHub repository:** <span class="ot">&lt;https://github.com/Buenoalexa11/IBM6540-Reports&gt;</span></span>
+</code></pre></div><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal><i class="bi"></i></button></div>
+</div></div></div></div></div>
 </div> <!-- /content -->
 
 

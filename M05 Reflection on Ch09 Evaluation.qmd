@@ -413,7 +413,7 @@ mc_preds |>
             share = n() / nrow(mc_preds),
             sensitivity = mean(.pred_class == loyalty_tier)) |>
   kable(digits = 3)
-````
+```
 
 :::
 
