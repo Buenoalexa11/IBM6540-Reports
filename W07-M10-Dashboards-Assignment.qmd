@@ -527,7 +527,7 @@ Exploring the app with different settings shows:
 
 ## Interactive App
 
-**Live Shiny app:** <https://buenoalexa11.shinyapps.io/shopify-explorer/>
+**Live Shiny app:** <https://xaic5x-alexa-bueno.shinyapps.io/shopify-explorer/>
 
 # Conclusion
 
@@ -543,7 +543,7 @@ I used Claude (Anthropic) to help structure the dashboards and this report and t
 # Appendix
 
 - **Static dashboard (GitHub Pages):** <https://buenoalexa11.github.io/IBM6540-Reports/shopify-dashboard.html>
-- **Shiny app (shinyapps.io):** <https://buenoalexa11.shinyapps.io/shopify-explorer/>
+- **Shiny app (shinyapps.io):** <https://xaic5x-alexa-bueno.shinyapps.io/shopify-explorer/>
 - **This report (GitHub Pages):** <https://buenoalexa11.github.io/IBM6540-Reports/W07-M10-Dashboards-Assignment.html>
 - **This report's QMD on GitHub:** <https://github.com/Buenoalexa11/IBM6540-Reports/blob/main/W07-M10-Dashboards-Assignment.qmd>
 - **GitHub repository:** <https://github.com/Buenoalexa11/IBM6540-Reports>
