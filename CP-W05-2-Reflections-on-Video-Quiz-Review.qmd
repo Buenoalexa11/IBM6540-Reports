@@ -1,0 +1,333 @@
+---
+title: "CP-W05-2-Reflections on Video Quiz Review"
+subtitle: "M05: Reflection on Odds, Log(Odds), Odds Ratio, and Log(OR)"
+author: "Alexa Bueno"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-expand: 1
+    toc-location: right-body
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-overflow: wrap
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  freeze: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(knitr)
+```
+
+# Introduction
+
+This report reflects on the logistic regression fundamentals reviewed in the class recording. The four building blocks of logistic regression are **probability**, **odds**, **log(odds)**, and the **odds ratio (OR)**. I redo the core questions from class step by step, with the answers, the reasoning behind them, and the R code. I want to be able to explain each concept on the exam, not just compute it.
+
+::: {.callout-note}
+## Why This Matters
+
+Linear regression predicts a number that can go anywhere from $-\infty$ to $+\infty$. A probability is stuck between 0 and 1. Logistic regression solves this by modeling the **log(odds)**, which *can* take any value, and then converting the prediction back into a probability.
+:::
+
+# From Probability to Odds to Log(Odds)
+
+## What Is the Difference Between Probability and Odds?
+
+> **Prompt:** How are probability and odds different, and how do you convert from one to the other?
+
+**Probability** compares the number of times an event happens to the *total* number of chances. **Odds** compare the number of times an event happens to the number of times it *does not* happen.
+
+$$
+\text{Odds} = \frac{p}{1 - p}
+$$ {#eq-odds}
+
+Going the other way, a probability can always be recovered from the odds:
+
+$$
+p = \frac{\text{Odds}}{1 + \text{Odds}}
+$$ {#eq-prob}
+
+For example, if 20 out of 100 customers buy a product:
+
+- Probability of purchase $= 20/100 = 0.20$
+- Odds of purchase $= 20/80 = 0.25$, which is read as "1 to 4"
+
+::: {.callout-warning}
+## Common Mistake
+
+Odds of 0.25 do **not** mean a 25% chance. Using @eq-prob, odds of 0.25 correspond to a probability of $0.25 / 1.25 = 0.20$, or 20%.
+:::
+
+## Why Do We Take the Log of the Odds?
+
+> **Prompt:** Why does logistic regression use log(odds) instead of probability or odds?
+
+Each transformation stretches the range of the outcome:
+
+| Scale | Lowest value | Highest value | Value at "50/50" |
+|:------|:------------:|:-------------:|:----------------:|
+| Probability | 0 | 1 | 0.5 |
+| Odds | 0 | $+\infty$ | 1 |
+| Log(odds) | $-\infty$ | $+\infty$ | 0 |
+
+: How each scale changes the range of the outcome {#tbl-ranges}
+
+As @tbl-ranges shows, odds remove the upper limit of 1, but they still cannot be negative. Taking the natural log removes the lower limit as well. Log(odds) is also **symmetric** around 0: odds of 3 and odds of 1/3 give log(odds) of $+1.10$ and $-1.10$. This is what lets logistic regression use a straight-line equation, just like linear regression:
+
+$$
+\log\left(\frac{p}{1-p}\right) = \beta_0 + \beta_1 X
+$$ {#eq-logit}
+
+The left side of @eq-logit is called the **logit**.
+
+## Converting Between the Three Scales in R
+
+```{r}
+#| label: tbl-scales
+#| tbl-cap: "The same event described as a probability, odds, and log(odds)"
+
+p <- c(0.10, 0.20, 0.25, 0.50, 0.75, 0.90)
+
+scales <- data.frame(
+  probability = p,
+  odds        = round(p / (1 - p), 3),
+  log_odds    = round(log(p / (1 - p)), 3)
+)
+
+kable(scales, col.names = c("Probability", "Odds", "Log(odds)"))
+```
+
+@tbl-scales confirms three rules I should remember:
+
+1. A probability of **0.5** gives odds of **1** and log(odds) of **0**.
+2. Probabilities **below 0.5** give odds below 1 and **negative** log(odds).
+3. Probabilities **above 0.5** give odds above 1 and **positive** log(odds).
+
+```{r}
+#| label: fig-sigmoid
+#| fig-cap: "The logistic (S-shaped) curve converts log(odds) back into a probability"
+
+log_odds <- seq(-6, 6, by = 0.1)
+prob     <- exp(log_odds) / (1 + exp(log_odds))   # same as plogis(log_odds)
+
+plot(log_odds, prob, type = "l", lwd = 2, col = "steelblue",
+     xlab = "Log(odds)", ylab = "Probability")
+abline(h = 0.5, v = 0, lty = 2, col = "gray50")
+```
+
+@fig-sigmoid shows why logistic regression predictions always stay between 0 and 1. No matter how large or small the log(odds) gets, the curve flattens out before reaching 0 or 1.[^plogis]
+
+[^plogis]: In R, `plogis()` converts log(odds) to a probability and `qlogis()` converts a probability to log(odds). They are shortcuts for the formulas written out in the code above.
+
+# Odds Ratio and Log(Odds Ratio)
+
+## What Does an Odds Ratio Tell Us?
+
+> **Prompt:** What is an odds ratio, and how do you interpret it?
+
+An **odds ratio** compares the odds of an outcome in one group to the odds in another group:
+
+$$
+\text{OR} = \frac{\text{Odds}_{\text{group 1}}}{\text{Odds}_{\text{group 0}}}
+$$ {#eq-or}
+
+- **OR = 1:** the groups have the same odds (no effect)
+- **OR > 1:** the outcome is *more* likely in group 1
+- **OR < 1:** the outcome is *less* likely in group 1
+
+The **log(OR)** follows the same idea on the log scale: 0 means no effect, positive means higher odds, and negative means lower odds.
+
+## Worked Example: Email Campaign
+
+> **Prompt:** Calculate the odds, odds ratio, and log(odds ratio) for a two-group example, and show how they connect to a logistic regression.
+
+To make this concrete, I use a marketing example. A retailer sends a promotional email to 1,000 customers and holds out 1,000 customers as a control group. Then it tracks who makes a purchase.
+
+```{r}
+#| label: tbl-campaign
+#| tbl-cap: "Purchases by campaign group"
+
+campaign <- data.frame(
+  group     = c("Control (no email)", "Received email"),
+  purchased = c(100, 200),
+  no_purchase = c(900, 800)
+)
+campaign$total       <- campaign$purchased + campaign$no_purchase
+campaign$probability <- campaign$purchased / campaign$total
+campaign$odds        <- campaign$purchased / campaign$no_purchase
+campaign$log_odds    <- log(campaign$odds)
+
+kable(campaign, digits = 4,
+      col.names = c("Group", "Purchased", "No purchase", "Total",
+                    "Probability", "Odds", "Log(odds)"))
+```
+
+::: {.panel-tabset}
+
+### Step 1: Odds
+
+- Control odds $= 100 / 900 = 0.1111$
+- Email odds $= 200 / 800 = 0.2500$
+
+### Step 2: Odds Ratio
+
+$$
+\text{OR} = \frac{0.2500}{0.1111} = 2.25
+$$
+
+The odds of purchasing are **2.25 times higher** for customers who received the email. Put another way, the email is associated with a **125% increase in the odds** of purchase, since $(2.25 - 1) \times 100 = 125\%$.
+
+### Step 3: Log(OR)
+
+$$
+\log(2.25) = 0.8109
+$$
+
+The log(OR) is positive, which matches the conclusion that the email raises the odds of purchase.
+
+### Step 4: In R
+
+```{r}
+#| label: or-calc
+
+odds_control <- campaign$odds[1]
+odds_email   <- campaign$odds[2]
+
+odds_ratio <- odds_email / odds_control
+log_or     <- log(odds_ratio)
+
+c(odds_ratio = odds_ratio, log_or = log_or)
+```
+
+:::
+
+::: {.callout-important}
+## Odds Ratio Is Not the Same as "Twice as Likely"
+
+The purchase *probability* doubled, from 10% to 20%, so the **relative risk** is 2.0. The **odds ratio** is 2.25. The two numbers are close only when the outcome is rare. When I explain results to a business audience, I need to be careful to say "the *odds* are 2.25 times higher," not "customers are 2.25 times more likely to buy."
+:::
+
+## Connecting the Odds Ratio to Logistic Regression
+
+> **Prompt:** How do the coefficients of a logistic regression relate to log(odds) and the odds ratio?
+
+To check that the manual calculation matches the model, I rebuild the data at the customer level and fit a logistic regression with `glm()`.
+
+```{r}
+#| label: glm-campaign
+
+customers <- data.frame(
+  email    = rep(c(0, 0, 1, 1), times = c(100, 900, 200, 800)),
+  purchase = rep(c(1, 0, 1, 0), times = c(100, 900, 200, 800))
+)
+
+model_email <- glm(purchase ~ email, data = customers, family = binomial)
+summary(model_email)$coefficients
+```
+
+```{r}
+#| label: tbl-glm-compare
+#| tbl-cap: "The model coefficients match the hand calculations"
+
+coefs <- coef(model_email)
+
+compare <- data.frame(
+  quantity = c("Intercept (b0)", "Slope for email (b1)", "exp(b1)"),
+  model    = c(coefs[1], coefs[2], exp(coefs[2])),
+  by_hand  = c(log(100/900), log_or, odds_ratio),
+  meaning  = c("Log(odds) of purchase for the control group",
+               "Log(OR): email vs. control",
+               "Odds ratio: email vs. control")
+)
+
+kable(compare, digits = 4, row.names = FALSE,
+      col.names = c("Quantity", "From glm()", "By hand", "Meaning"))
+```
+
+@tbl-glm-compare shows the most important takeaway from this module:
+
+- The **intercept** is the log(odds) of the outcome for the reference group.
+- Each **slope coefficient** is a **log(odds ratio)**.
+- **Exponentiating** a slope with `exp()` turns it into an **odds ratio**, which is much easier to explain.
+
+# Interpreting a Continuous Predictor
+
+> **Prompt:** How do you interpret a logistic regression coefficient when the predictor is continuous?
+
+With a continuous predictor, the coefficient is the change in log(odds) for a **one-unit increase** in $X$. I practiced this with the built-in `mtcars` data. The model predicts whether a car has a manual transmission (`am = 1`) from its weight (`wt`, in 1,000 lbs).
+
+```{r}
+#| label: glm-mtcars
+
+model_wt <- glm(am ~ wt, data = mtcars, family = binomial)
+
+b1    <- coef(model_wt)["wt"]
+or_wt <- exp(b1)
+
+round(c(log_or = unname(b1), odds_ratio = unname(or_wt)), 4)
+```
+
+**Interpretation:**
+
+- **Log(OR):** each additional 1,000 lbs of weight changes the log(odds) of a manual transmission by `r round(b1, 3)`.
+- **Odds ratio:** each additional 1,000 lbs multiplies the odds of a manual transmission by `r round(or_wt, 4)`, which is a decrease of about `r round((1 - or_wt) * 100, 1)`% in the odds.
+
+Heavier cars are much less likely to be manual. The coefficient is negative, the odds ratio is below 1, and both point the same way.
+
+```{r}
+#| label: predict-mtcars
+
+new_cars <- data.frame(wt = c(2.5, 3.0, 3.5))
+new_cars$log_odds    <- predict(model_wt, new_cars, type = "link")
+new_cars$probability <- predict(model_wt, new_cars, type = "response")
+
+kable(new_cars, digits = 3,
+      col.names = c("Weight (1,000 lbs)", "Predicted log(odds)", "Predicted probability"))
+```
+
+::: {.callout-tip}
+## `type = "link"` vs. `type = "response"`
+
+`predict()` returns **log(odds)** by default (`type = "link"`). To get a **probability**, I need `type = "response"`. Forgetting this is an easy way to report a wrong answer.
+:::
+
+# Summary of What I Need to Know
+
+| Concept | Formula | No-effect value | How to read it |
+|:--------|:--------|:---------------:|:---------------|
+| Probability | $p$ | — | Chance out of the total |
+| Odds | $p / (1-p)$ | 1 | Event vs. non-event |
+| Log(odds) | $\log\big(p/(1-p)\big)$ | 0 | Scale the model predicts on |
+| Odds ratio | $\text{Odds}_1 / \text{Odds}_0$ | 1 | Multiplier on the odds |
+| Log(OR) | $\log(\text{OR})$ | 0 | A logistic regression slope |
+
+: Key formulas for logistic regression {#tbl-summary}
+
+**Main lessons from this module:**
+
+1. Logistic regression is linear on the **log(odds)** scale, not the probability scale (@eq-logit).
+2. Slope coefficients are **log(odds ratios)**. I use `exp()` to turn them into **odds ratios** for interpretation.
+3. An odds ratio describes a change in **odds**, not in probability. I should word business conclusions carefully.
+4. I can use `plogis()` or `predict(..., type = "response")` to convert predictions back into probabilities.
+
+# Tool Use
+
+I used Claude (Anthropic) to help organize this reflection and to check the R code and the worked calculations. I reviewed every step and can explain each concept and line of code on my own.
+
+# Appendix
+
+- **Published report (GitHub Pages):** <https://buenoalexa11.github.io/IBM6540-Reports/CP-W05-2-Reflections-on-Video-Quiz-Review.html>
+- **QMD file on GitHub:** <https://github.com/Buenoalexa11/IBM6540-Reports/blob/main/CP-W05-2-Reflections-on-Video-Quiz-Review.qmd>
+- **GitHub repository:** <https://github.com/Buenoalexa11/IBM6540-Reports>
